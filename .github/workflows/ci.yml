@@ -1,0 +1,89 @@
+name: CI
+
+# Lint + unit tests on every push and PR. Tests are fully offline (SDKs mocked),
+# so no API keys or network access are required.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install (with all optional adapters + dev tools)
+        run: |
+          python -m pip install --upgrade pip
+          # Install the package with every extra so adapter import paths are
+          # exercised, plus test/lint tooling.
+          pip install ".[all,dev]"
+          pip install ruff
+
+      - name: Lint (ruff)
+        run: ruff check injectkit tests
+
+      - name: Run unit tests
+        # Offline: no ANTHROPIC_API_KEY set on purpose; any test that touches the
+        # SDK must mock it.
+        run: python -m pytest -q
+
+  entrypoint:
+    name: action entrypoint (shell)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint entrypoint with shellcheck
+        run: shellcheck entrypoint.sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install injectkit
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[all,dev]"
+
+      - name: Exercise the entrypoint against the mock target (offline)
+        # Drives the real entrypoint with the built-in mock target — no network,
+        # no key — and asserts it publishes outputs and a non-zero scan code
+        # (the mock target is intentionally vulnerable).
+        env:
+          INJECTKIT_TARGET: mock
+          INJECTKIT_FORMAT: sarif
+          INJECTKIT_OUT: entrypoint-smoke.sarif
+          INJECTKIT_FAIL_ON: high
+          GITHUB_OUTPUT: ${{ runner.temp }}/gh_output
+          GITHUB_STEP_SUMMARY: ${{ runner.temp }}/gh_summary
+        run: |
+          : >"$GITHUB_OUTPUT"
+          bash entrypoint.sh
+          echo "---- outputs ----"
+          cat "$GITHUB_OUTPUT"
+          grep -q '^exit-code=' "$GITHUB_OUTPUT"
+          grep -q '^sarif-path=' "$GITHUB_OUTPUT"
+          test -f entrypoint-smoke.sarif

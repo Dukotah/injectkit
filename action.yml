@@ -1,0 +1,162 @@
+name: "injectkit — LLM prompt-injection scan"
+description: >-
+  Red-team your own LLM application for prompt injection in CI. Runs the
+  injectkit attack corpus against an endpoint you own or are authorized to
+  test, emits SARIF for GitHub code-scanning, and fails the build on a
+  severity threshold. Defensive / authorized-use only.
+author: "Dukotah / Copper Bay Labs"
+
+# A teal flask: red-team your own LLM apps.
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  config:
+    description: >-
+      Path to a .injectkit.yaml config file (relative to the workspace).
+      Optional; if omitted, injectkit looks for .injectkit.yaml in the repo
+      root. CLI inputs below override values from the file.
+    required: false
+    default: ""
+  target:
+    description: >-
+      Target kind: "anthropic", "http", "mcp", or "mock". "mock" runs the
+      built-in deterministic target (no network, no key) and is handy for
+      trying the Action out.
+    required: false
+    default: ""
+  url:
+    description: "Endpoint URL for the http target (ignored for other kinds)."
+    required: false
+    default: ""
+  model:
+    description: "Model id for the target (e.g. claude-opus-4-8)."
+    required: false
+    default: ""
+  judge:
+    description: >-
+      Enable the optional Anthropic LLM judge for sharper grading
+      ("true"/"false"). Requires anthropic-api-key. Off by default.
+    required: false
+    default: "false"
+  judge-model:
+    description: "Model id for the LLM judge (default claude-haiku-4-5)."
+    required: false
+    default: ""
+  fail-on:
+    description: >-
+      Minimum finding severity that fails the build:
+      info | low | medium | high | critical. Default high.
+    required: false
+    default: "high"
+  techniques:
+    description: >-
+      Comma-separated list of techniques/tags to include (e.g.
+      "direct_injection,jailbreak"). Default: all bundled attacks.
+    required: false
+    default: ""
+  format:
+    description: >-
+      Report format written to the output file:
+      terminal | json | markdown | sarif | html. Default sarif (for
+      code-scanning upload).
+    required: false
+    default: "sarif"
+  out:
+    description: "Path to write the report file. Default injectkit-results.sarif."
+    required: false
+    default: "injectkit-results.sarif"
+  upload-sarif:
+    description: >-
+      Upload the SARIF result to GitHub code-scanning ("true"/"false").
+      Only effective when format is sarif. Requires the calling workflow to
+      grant `security-events: write`. Default true.
+    required: false
+    default: "true"
+  anthropic-api-key:
+    description: >-
+      ANTHROPIC_API_KEY for the anthropic target and/or the LLM judge. Pass a
+      repository secret; never hard-code. Not needed for http/mock targets.
+    required: false
+    default: ""
+  injectkit-version:
+    description: >-
+      Version/spec of injectkit to install (passed to pip). Default installs
+      the copy checked out in the workspace if present, else the latest
+      release from PyPI.
+    required: false
+    default: ""
+  working-directory:
+    description: "Directory to run the scan from (where .injectkit.yaml lives)."
+    required: false
+    default: "."
+
+outputs:
+  exit-code:
+    description: "The injectkit scan exit code (0 = under threshold, non-zero = failed)."
+    value: ${{ steps.scan.outputs.exit-code }}
+  report-path:
+    description: "Absolute path to the written report file."
+    value: ${{ steps.scan.outputs.report-path }}
+  sarif-path:
+    description: "Path to the SARIF file when format is sarif (else empty)."
+    value: ${{ steps.scan.outputs.sarif-path }}
+  total:
+    description: "Total number of attacks run."
+    value: ${{ steps.scan.outputs.total }}
+  failed:
+    description: "Number of attacks that succeeded against the target (findings)."
+    value: ${{ steps.scan.outputs.failed }}
+  highest-severity:
+    description: "Highest finding severity, or 'none'."
+    value: ${{ steps.scan.outputs.highest-severity }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run injectkit scan
+      id: scan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        # Map Action inputs into the env the entrypoint reads. Keeping every
+        # input behind INJECTKIT_* keeps the entrypoint testable in isolation.
+        INJECTKIT_CONFIG: ${{ inputs.config }}
+        INJECTKIT_TARGET: ${{ inputs.target }}
+        INJECTKIT_URL: ${{ inputs.url }}
+        INJECTKIT_MODEL: ${{ inputs.model }}
+        INJECTKIT_JUDGE: ${{ inputs.judge }}
+        INJECTKIT_JUDGE_MODEL: ${{ inputs.judge-model }}
+        INJECTKIT_FAIL_ON: ${{ inputs.fail-on }}
+        INJECTKIT_TECHNIQUES: ${{ inputs.techniques }}
+        INJECTKIT_FORMAT: ${{ inputs.format }}
+        INJECTKIT_OUT: ${{ inputs.out }}
+        INJECTKIT_VERSION: ${{ inputs.injectkit-version }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        # GITHUB_ACTION_PATH lets the entrypoint find its sibling scripts.
+        INJECTKIT_ACTION_PATH: ${{ github.action_path }}
+      run: bash "${{ github.action_path }}/entrypoint.sh"
+
+    - name: Upload SARIF to code-scanning
+      # Only when the scan produced a SARIF file and upload is enabled. Runs
+      # even if the scan step "failed" (the threshold gate) so findings still
+      # reach the Security tab; the job result still reflects the gate.
+      if: ${{ always() && inputs.upload-sarif == 'true' && steps.scan.outputs.sarif-path != '' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif-path }}
+        category: injectkit
+
+    - name: Enforce severity gate
+      # Re-raise the scan's exit code as the final step so the job fails when a
+      # finding meets --fail-on, after the SARIF upload has run.
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        code="${{ steps.scan.outputs.exit-code }}"
+        if [ "${code:-0}" != "0" ]; then
+          echo "::error::injectkit found prompt-injection issues at or above the '${{ inputs.fail-on }}' threshold (exit ${code})."
+          exit "${code}"
+        fi
+        echo "injectkit scan passed: no findings at or above the '${{ inputs.fail-on }}' threshold."

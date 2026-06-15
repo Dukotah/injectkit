@@ -1,0 +1,139 @@
+name: Self-scan (demo the Action)
+
+# Demonstrates the injectkit GitHub Action end-to-end by scanning a target we
+# own: a local mock LLM endpoint started inside the job. This is the canonical
+# "scan your own site" example — copy this pattern into your own repo, swap the
+# mock endpoint for your real one, and add ANTHROPIC_API_KEY if you use the
+# anthropic target or the LLM judge.
+#
+# DEFENSIVE / AUTHORIZED USE ONLY.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Required so the Action can upload SARIF to the Security tab.
+  security-events: write
+
+concurrency:
+  group: self-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 1) Clean pass: scan a SECURE mock endpoint. No findings -> the gate passes.
+  scan-secure:
+    name: scan secure endpoint (expect pass)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start the mock endpoint (secure mode)
+        run: |
+          pip install .  # core install is enough for the http target
+          MOCK_SECURE=1 python .github/scripts/mock_endpoint.py --port 8000 &
+          echo "MOCK_PID=$!" >>"$GITHUB_ENV"
+          # Wait for readiness.
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8000/ >/dev/null 2>&1 && break
+            sleep 0.5
+          done
+
+      - name: Write a scan config pointing at the local endpoint
+        run: |
+          cat > .injectkit.yaml <<'YAML'
+          target:
+            kind: http
+            name: demo-secure-endpoint
+            url: http://127.0.0.1:8000/v1/chat/completions
+            response_path: choices.0.message.content
+          YAML
+
+      - name: Run injectkit (this repo's Action)
+        id: scan
+        uses: ./
+        with:
+          fail-on: high
+          format: sarif
+          out: injectkit-secure.sarif
+          # The mock is local & ours; no key needed.
+          upload-sarif: "true"
+
+      - name: Show outputs
+        if: always()
+        run: |
+          echo "exit-code:        ${{ steps.scan.outputs.exit-code }}"
+          echo "total:            ${{ steps.scan.outputs.total }}"
+          echo "failed:           ${{ steps.scan.outputs.failed }}"
+          echo "highest-severity: ${{ steps.scan.outputs.highest-severity }}"
+
+      - name: Stop the mock endpoint
+        if: always()
+        run: kill "${MOCK_PID}" 2>/dev/null || true
+
+  # 2) Gate demo: scan a VULNERABLE mock endpoint. Findings -> the gate fails,
+  #    but SARIF still uploads. We invert the result so the demo job is green
+  #    while proving the Action fails the build when it should.
+  scan-vulnerable:
+    name: scan vulnerable endpoint (expect gate to fire)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start the mock endpoint (vulnerable mode)
+        run: |
+          pip install .
+          python .github/scripts/mock_endpoint.py --port 8001 &
+          echo "MOCK_PID=$!" >>"$GITHUB_ENV"
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8001/ >/dev/null 2>&1 && break
+            sleep 0.5
+          done
+
+      - name: Write a scan config pointing at the local endpoint
+        run: |
+          cat > .injectkit.yaml <<'YAML'
+          target:
+            kind: http
+            name: demo-vulnerable-endpoint
+            url: http://127.0.0.1:8001/v1/chat/completions
+            response_path: choices.0.message.content
+          YAML
+
+      - name: Run injectkit (expected to fail the gate)
+        id: scan
+        continue-on-error: true
+        uses: ./
+        with:
+          fail-on: high
+          format: sarif
+          out: injectkit-vulnerable.sarif
+          upload-sarif: "true"
+
+      - name: Assert the gate fired
+        run: |
+          echo "Action outcome: ${{ steps.scan.outcome }}"
+          echo "Scan exit-code: ${{ steps.scan.outputs.exit-code }}"
+          if [ "${{ steps.scan.outcome }}" != "failure" ]; then
+            echo "::error::Expected the vulnerable-endpoint scan to fail the gate, but it passed."
+            exit 1
+          fi
+          echo "Gate fired as expected on the vulnerable endpoint."
+
+      - name: Stop the mock endpoint
+        if: always()
+        run: kill "${MOCK_PID}" 2>/dev/null || true

@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "injectkit"
+version = "0.1.0"
+description = "Open-source red-team scanner for LLM prompt injection. Defensive, authorized-use only."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Dukotah / Copper Bay Labs" }]
+keywords = [
+    "prompt-injection",
+    "llm-security",
+    "red-team",
+    "ai-security",
+    "anthropic",
+    "security-scanner",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+
+# Core deps: the CLI, corpus loader, HTTP target, heuristics, and reporters
+# all work with just these. Heavy/optional SDKs are extras (lazy-imported).
+dependencies = [
+    "pyyaml>=6.0",
+    "rich>=13.0",
+    "pydantic>=2.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# Anthropic Messages API target + LLM judge.
+anthropic = ["anthropic>=0.69"]
+# MCP server / agent tool-use adapter.
+mcp = ["mcp>=1.0"]
+# Everything optional, for a full install.
+all = ["anthropic>=0.69", "mcp>=1.0"]
+# Test/dev tooling.
+dev = ["pytest>=8.0"]
+
+[project.urls]
+Homepage = "https://dukotah.github.io/injectkit/"
+Repository = "https://github.com/Dukotah/injectkit"
+Issues = "https://github.com/Dukotah/injectkit/issues"
+Changelog = "https://github.com/Dukotah/injectkit/blob/main/CHANGELOG.md"
+Security = "https://github.com/Dukotah/injectkit/blob/main/SECURITY.md"
+
+[project.scripts]
+injectkit = "injectkit.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["injectkit*"]
+
+# Ship the bundled YAML attack corpus inside the wheel.
+[tool.setuptools.package-data]
+injectkit = ["corpus/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
