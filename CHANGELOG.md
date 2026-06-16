@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [0.3.0] — 2026-06-16
+
+injectkit widens the attack surface it can measure with more obfuscation
+ciphers, a semantic translation transform, reply-aware multi-turn escalation, a
+named-attacker registry covering the canonical automated-jailbreak papers, an
+optional white-box GCG suffix optimizer, and a richer 5-class response grade —
+still benign-canary based, still offline-first, still **defensive /
+authorized-use only**. Every technique cites a primary research source in the
+new `docs/RESEARCH.md`.
+
+### Added
+
+- **Cipher & encoding transforms** — six new canary-preserving, deterministic
+  transforms on the `--mutate` axis (`transforms/ciphers.py`): `caesar`,
+  `atbash`, `morse`, `unicode_escape`, `artprompt` (ASCII-art masking), and
+  `selfcipher` (role-play cipher framing). Registered through the existing
+  `TransformRegistry` via `register_builtin_ciphers()`. Grounded in CipherChat
+  (arXiv:2308.06463) and ArtPrompt (arXiv:2402.11753).
+- **Semantic translation transform** — a `translate` transform
+  (`transforms/translate.py`) routes the payload through a low-resource language
+  (default Swahili) to probe cross-lingual robustness; a *semantic* transform,
+  not a character cipher. Uses a lazy, offline `argostranslate` backend behind a
+  `Translator` protocol, with a friendly error if it is not installed. Grounded
+  in low-resource-language jailbreak findings (arXiv:2310.02446 / MultiJail
+  arXiv:2310.06474).
+- **Reply-aware crescendo strategies** — two new multi-turn strategies
+  (`attacks/multiturn.py`), both added to `MULTI_TURN_STRATEGIES`:
+  `crescendo_reply` escalates by quoting the model's own prior replies before the
+  scored seed-payload ask, and `crescendo_decompose` breaks the benign objective
+  into a chain of individually-benign, canary-free sub-tasks and only carries the
+  live marker on the final scored turn (the agent-decomposition variant). Grounded
+  in Crescendo (arXiv:2404.01833).
+- **Named-attacker registry** — a pre-seeded `AttackerRegistry`
+  (`attackers/registry.py`) declaring the canonical automated jailbreak
+  techniques, each carrying its citation: the black-box **PAIR**
+  (arXiv:2310.08419), **TAP** (arXiv:2312.02119), **AutoDAN** (arXiv:2310.04451),
+  and **GPTFUZZER** (arXiv:2309.10253), plus the white-box **GCG**. They optimize
+  attack *structure* against the benign canary proxy, never harmful content.
+- **White-box GCG suffix optimizer (optional, HuggingFace-only)** — a
+  `WhiteBoxGCGAttacker` base (`attackers/whitebox_base.py`) that optimizes an
+  adversarial suffix from model gradients so a **local** white-box HuggingFace
+  model emits the **benign** canary marker — a robustness test, never harmful
+  output. `torch` / `transformers` are lazy-imported and the optimization is
+  compute-heavy (GPU recommended). **No harmful suffix artifact is bundled.**
+  Grounded in GCG / AmpleGCG (arXiv:2404.07921) and Mask-GCG (arXiv:2509.06350).
+- **5-class response scoring** — `evaluators/response_class.py` grades each reply
+  into `reject_irrelevant` · `reject_safety` · `too_long` · `partial` · `full`,
+  while keeping the boolean headline **frozen**: a scan succeeds only on `full`
+  (`ResponseClass.is_success`). Grounded in SoK Prompt Hacking (arXiv:2410.13901)
+  and StrongREJECT.
+- **Docs** — new `docs/RESEARCH.md` (the cited 2023–2026 research map, with the
+  honest frontier-robustness caveat that the "90%+ on flagship models" narrative
+  is overstated); expanded `docs/TAXONOMY.md` and `docs/BENCHMARK.md` for the new
+  families, attackers, and 5-class grade; README and landing page updated with a
+  v0.3.0 section that keeps the ethics / research-use posture and frontier caveat
+  prominent.
+
 ## [0.2.0] — 2026-06-15
 
 injectkit grows from a single pass/fail scan into a reproducible **robustness
@@ -114,6 +171,7 @@ authorized to test for prompt injection, then reports which attacks got through.
 - **CI** — test workflow plus a self-scan workflow that runs injectkit against
   its own bundled demo target.
 
-[Unreleased]: https://github.com/Dukotah/injectkit/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Dukotah/injectkit/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Dukotah/injectkit/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Dukotah/injectkit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Dukotah/injectkit/releases/tag/v0.1.0

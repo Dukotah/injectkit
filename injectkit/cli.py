@@ -246,6 +246,19 @@ def _add_robustness_args(p: argparse.ArgumentParser) -> None:
         "local attacker model (see --attacker-target/--attacker-model).",
     )
     p.add_argument(
+        "--attacker",
+        metavar="NAME",
+        choices=("refine", "pair", "tap", "autodan", "gptfuzzer", "gcg"),
+        help="Named automated red-teamer to use for adaptive refinement "
+        "(implies --adaptive). Black-box (drive a local attacker model): "
+        "pair | tap | autodan | gptfuzzer. White-box (HF-only, compute-heavy, "
+        "gradient suffix toward the BENIGN canary only): gcg — needs a local "
+        "white-box model the CLI can't build, so use the Python API for it. "
+        "Default (or 'refine'): the built-in single-rewrite refine loop. Each "
+        "optimises attack STRUCTURE toward the benign marker, never harmful "
+        "content.",
+    )
+    p.add_argument(
         "--attacker-target",
         choices=("ollama",),
         default="ollama",
@@ -706,6 +719,17 @@ def _cmd_scan(args: argparse.Namespace, *, out: object, err: object) -> int:
         )
     else:
         print(rendered, file=out)
+
+    # Graded five-class breakdown of the outcome (full | partial | too_long |
+    # reject_safety | reject_irrelevant). The `full` count equals the report's
+    # success count (frozen invariant), so this annotates *why* the rest did not
+    # fully succeed without changing the pass/fail signal. Printed to stderr so
+    # the report on stdout/file stays clean for machine consumers.
+    from . import cli_robustness as _cr
+
+    summary = _cr.format_response_class_summary(report)
+    if summary:
+        print(f"injectkit: {summary}", file=err)
 
     if _meets_fail_threshold(report, config.fail_on):
         worst = report.highest_severity

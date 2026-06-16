@@ -230,6 +230,16 @@ class Engine:
         :class:`SingleShotStrategy`), so this method is a strict superset of
         :meth:`run_one` for the conversational path.
 
+        Strategies that expose the *adaptive* reply-referencing contract
+        (``next_turn`` + ``final_step``, e.g.
+        :class:`~injectkit.attacks.multiturn.CrescendoReplyReferencingStrategy`)
+        are driven turn-by-turn instead of via the static ``build``: each lead-in
+        is sent, the target's REAL reply is captured and fed back into
+        ``next_turn`` so the next escalation quotes what the model actually said,
+        and ``final_step`` produces the scored payload-bearing turn. Strategies
+        without that contract keep the static ``build(attack, canary)`` path
+        unchanged.
+
         Args:
             attack: The (scored) attack whose ``payload`` carries the ``{canary}``
                 marker. Its ``system`` is rendered with the live canary and
@@ -255,6 +265,13 @@ class Engine:
         conv = as_conversational(self.target)
 
         start = time.perf_counter()
+        # Adaptive reply-referencing strategies (next_turn + final_step) are driven
+        # turn-by-turn so each escalation can quote the target's REAL prior reply.
+        # All other strategies keep the static build()-then-deliver path.
+        if _is_adaptive_strategy(strategy):
+            response = self._deliver_adaptive(conv, strategy, system, attack, canary)
+            return self._score_response(attack, canary, response, start)
+
         try:
             steps = strategy.build(attack, canary)
         except StrategyError as exc:
@@ -311,6 +328,64 @@ class Engine:
             text="",
             error="strategy produced no scored, response-expecting turn.",
         )
+
+    def _deliver_adaptive(
+        self,
+        conv: "ConversationalTarget",
+        strategy: "AttackStrategy",
+        system: Optional[str],
+        attack: Attack,
+        canary: str,
+    ) -> TargetResponse:
+        """Drive an adaptive (reply-referencing) strategy turn-by-turn.
+
+        Unlike :meth:`_deliver` (which delivers a pre-built static turn list),
+        this loop is what makes the Crescendo reply-referencing/decomposition
+        strategies actually reply-aware: it asks the strategy for each lead-in via
+        ``next_turn(attack, canary, history)``, sends it, captures the target's
+        REAL reply, and appends BOTH the lead-in and that reply to ``history`` so
+        the next ``next_turn`` call quotes what the model actually said. After
+        ``strategy.steps`` lead-ins it calls ``final_step(attack, canary,
+        history)`` to produce the single scored, payload-bearing turn, sends it,
+        and returns that response for scoring.
+
+        ``history`` is the ``(role, content)`` list the strategy's hooks consume.
+        A strategy or target fault never aborts the scan: ``StrategyError`` (or any
+        exception) from a hook, and any ``conv.chat`` fault, become an errored
+        response — exactly like the static path.
+        """
+        from .attacks.base import StrategyError
+        from .targets.conversational import ChatMessage
+
+        history: list[tuple[str, str]] = []
+        steps = int(getattr(strategy, "steps", 1) or 1)
+
+        try:
+            for _ in range(max(0, steps)):
+                step = strategy.next_turn(attack, canary, history)  # type: ignore[attr-defined]
+                messages = [ChatMessage(role=r, content=c) for r, c in history]
+                messages.append(step.message)
+                reply = self._chat(conv, messages, system)
+                history.append((step.message.role, step.message.content))
+                # Feed the target's REAL reply back so the next lead-in quotes it.
+                # An errored reply still becomes history (text is ""), so the loop
+                # stays deterministic and never raises.
+                history.append(("assistant", reply.text))
+            final = strategy.final_step(attack, canary, history)  # type: ignore[attr-defined]
+        except StrategyError as exc:
+            return TargetResponse(
+                text="",
+                error=f"strategy adaptive hook raised StrategyError: {exc}",
+            )
+        except Exception as exc:  # noqa: BLE001 - a flaky strategy must not abort the scan
+            return TargetResponse(
+                text="",
+                error=f"strategy adaptive hook raised {type(exc).__name__}: {exc}",
+            )
+
+        messages = [ChatMessage(role=r, content=c) for r, c in history]
+        messages.append(final.message)
+        return self._chat(conv, messages, system)
 
     def _chat(
         self,
@@ -689,6 +764,22 @@ class Engine:
             if r.response.model:
                 return r.response.model
         return None
+
+
+def _is_adaptive_strategy(strategy: "AttackStrategy") -> bool:
+    """True if ``strategy`` exposes the adaptive reply-referencing contract.
+
+    A strategy is driven turn-by-turn (so each escalation can quote the target's
+    real prior reply) iff it provides BOTH ``next_turn`` and ``final_step`` as
+    callables — the hooks
+    :class:`~injectkit.attacks.multiturn.CrescendoReplyReferencingStrategy` adds on
+    top of the static ``build``. Strategies with only ``build`` (single-shot,
+    crescendo, many-shot, persona, context-overflow) take the static path
+    unchanged.
+    """
+    return callable(getattr(strategy, "next_turn", None)) and callable(
+        getattr(strategy, "final_step", None)
+    )
 
 
 def _is_stronger(candidate: AttackResult, current: AttackResult) -> bool:

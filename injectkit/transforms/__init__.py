@@ -36,6 +36,29 @@ from .encoders import (
     register_builtin_transforms,
 )
 
+# v0.3.0 cipher / art-prompt / self-cipher transforms (fully implemented).
+# Exported so builders/integrator can import the classes/keys. NOT auto-registered
+# at import here (unlike encoders) — the integrator calls register_builtin_ciphers()
+# (and register_translate()) to surface the new names in the registry/CLI.
+from .ciphers import (  # noqa: F401
+    ArtPromptTransform,
+    AtbashCipher,
+    CIPHER_TRANSFORM_NAMES,
+    CaesarCipher,
+    MorseCipher,
+    SelfCipherTransform,
+    UnicodeEscapeCipher,
+    register_builtin_ciphers,
+)
+from .translate import (  # noqa: F401
+    DEFAULT_TARGET_LANG,
+    TRANSLATE_TRANSFORM_NAME,
+    ArgosTranslator,
+    TranslateTransform,
+    Translator,
+    register_translate,
+)
+
 __all__ = [
     "Transform",
     "TransformError",
@@ -56,4 +79,20 @@ __all__ = [
     "UnicodeHomoglyph",
     "ZeroWidthInsertion",
     "register_builtin_transforms",
+    # v0.3.0 cipher / art-prompt / self-cipher CONTRACTS
+    "CaesarCipher",
+    "AtbashCipher",
+    "MorseCipher",
+    "UnicodeEscapeCipher",
+    "ArtPromptTransform",
+    "SelfCipherTransform",
+    "CIPHER_TRANSFORM_NAMES",
+    "register_builtin_ciphers",
+    # v0.3.0 semantic translate CONTRACT
+    "Translator",
+    "ArgosTranslator",
+    "TranslateTransform",
+    "TRANSLATE_TRANSFORM_NAME",
+    "DEFAULT_TARGET_LANG",
+    "register_translate",
 ]

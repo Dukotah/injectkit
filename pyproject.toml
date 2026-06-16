@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "injectkit"
-version = "0.2.0"
+version = "0.3.0"
 description = "Open-source red-team scanner for LLM prompt injection. Defensive, authorized-use only."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -52,6 +52,11 @@ ollama = ["requests>=2.28"]
 openai = ["requests>=2.28"]
 # Gated, opt-in research-dataset loaders (download official datasets on demand).
 research = ["requests>=2.28"]
+# Offline semantic-translation backend for the `translate` transform
+# (low-resource-language bypass test). TranslateTransform lazy-imports
+# argostranslate and raises a friendly error if absent; this extra ships the
+# optional backend. NOT a core dep.
+translate = ["argostranslate>=1.9"]
 # Everything optional, for a full install.
 all = [
     "anthropic>=0.69",
@@ -59,6 +64,7 @@ all = [
     "transformers>=4.40",
     "torch>=2.0",
     "requests>=2.28",
+    "argostranslate>=1.9",
 ]
 # Test/dev tooling.
 dev = ["pytest>=8.0"]

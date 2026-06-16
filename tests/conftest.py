@@ -317,3 +317,116 @@ def stub_local_model() -> StubLocalModel:
 def fake_conversational_target() -> FakeConversationalTarget:
     """A fresh vulnerable multi-turn target."""
     return FakeConversationalTarget()
+
+
+# --------------------------------------------------------------------------- #
+# v0.3.0 shared stubs: an offline white-box model (fake logits/grads) for GCG
+# and an offline translator for the semantic translate transform. Both let the
+# new heavy/optional modules be exercised with NO torch, NO transformers, NO
+# argostranslate, and NO network — so GCG/translate tests run fully offline and
+# at most a trivial 1-step path.
+# --------------------------------------------------------------------------- #
+
+
+class StubWhiteBoxModel:
+    """Offline stand-in for a white-box HF model (fake logits/grads).
+
+    Satisfies the
+    :class:`~injectkit.attackers.whitebox_base.WhiteBoxModel` protocol (``name``,
+    ``token_ids``, ``decode``, ``target_loss``, ``token_gradients``) using only
+    pure-Python deterministic fakes — no ``torch``, no ``transformers``, no model
+    download. It lets the GCG contract / a 1-step optimisation path be tested
+    fully offline; the "gradients" and "loss" are toy numbers, never real ops.
+
+    Args:
+        name: Model identifier reported in metadata.
+        vocab: Fake vocabulary size for the gradient tensor's second dim.
+        emit: Optional text the model "emits" (used by a stub that checks the
+            benign-marker success path); defaults to echoing decoded input.
+    """
+
+    def __init__(
+        self,
+        name: str = "stub-whitebox",
+        vocab: int = 32,
+        emit: Optional[str] = None,
+    ) -> None:
+        self.name = name
+        self.vocab = vocab
+        self.emit = emit
+        # Records of every call so tests can assert the optimisation touched the
+        # model exactly as expected (and never more than the step budget).
+        self.calls: list[str] = []
+
+    def token_ids(self, text: str):
+        """Encode ``text`` to a deterministic list of small int ids (offline)."""
+        self.calls.append("token_ids")
+        return [(ord(c) % self.vocab) for c in (text or "")]
+
+    def decode(self, ids) -> str:
+        """Decode toy ids back to text (best-effort, total)."""
+        self.calls.append("decode")
+        try:
+            return "".join(chr((int(i) % 26) + 97) for i in ids)
+        except Exception:  # noqa: BLE001 - a stub must never raise
+            return ""
+
+    def target_loss(self, input_ids, target_ids) -> float:
+        """Return a deterministic toy loss (lower = 'closer'); pure Python."""
+        self.calls.append("target_loss")
+        return float(abs(len(list(input_ids)) - len(list(target_ids))) + 1)
+
+    def token_gradients(self, input_ids, target_ids, suffix_slice):
+        """Return a deterministic ``[suffix_len, vocab]`` fake gradient grid.
+
+        No torch — just nested lists, so a GCG step can pick "top-k" candidates
+        without any real autograd. The values descend so index 0 looks 'best'.
+        """
+        self.calls.append("token_gradients")
+        suffix_len = len(range(*suffix_slice.indices(len(list(input_ids))))) if isinstance(
+            suffix_slice, slice
+        ) else int(suffix_slice)
+        return [[-(j + 1) for j in range(self.vocab)] for _ in range(max(1, suffix_len))]
+
+
+class StubTranslator:
+    """Offline stand-in for a :class:`Translator` (no argostranslate, no network).
+
+    Satisfies the
+    :class:`~injectkit.transforms.translate.Translator` protocol (``name`` +
+    ``translate``). It performs a deterministic, reversible pseudo-"translation"
+    (a fixed prefix tag) instead of a real one, so the semantic translate
+    transform can be tested offline. It NEVER touches the marker (the transform
+    is responsible for protecting marker spans), so tests can assert the canary
+    still survives.
+
+    Args:
+        name: Identifier reported in metadata.
+        tag: Prefix prepended to each translated chunk to make the change visible
+            and assertable without a real model.
+    """
+
+    def __init__(self, name: str = "stub:en->xx", tag: str = "[xx] ") -> None:
+        self.name = name
+        self.tag = tag
+        # Records (text, source, target) for assertions.
+        self.calls: list[tuple[str, str, str]] = []
+
+    def translate(self, text: str, *, source: str, target: str) -> str:
+        """Return a deterministic pseudo-translation of ``text`` (offline)."""
+        self.calls.append((text, source, target))
+        if not text:
+            return text
+        return f"{self.tag}{text}"
+
+
+@pytest.fixture
+def stub_whitebox_model() -> StubWhiteBoxModel:
+    """A fresh offline white-box model with fake logits/grads (no torch)."""
+    return StubWhiteBoxModel()
+
+
+@pytest.fixture
+def stub_translator() -> StubTranslator:
+    """A fresh offline translator stub (no argostranslate, no network)."""
+    return StubTranslator()

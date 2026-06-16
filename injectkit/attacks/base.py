@@ -12,11 +12,19 @@ abstraction covers:
   turns. These are described by a :class:`MultiTurnAttack` (a reusable template)
   or generated on the fly by a strategy.
 
-The engine drives a strategy like this (contract the engine builder implements):
+The engine (:meth:`injectkit.engine.Engine.run_strategy`) drives a strategy like
+this:
 
     strategy = attack_to_strategy(attack)
     steps = strategy.build(attack, canary)
     # send steps[0..n-1] as scripted history / probes, score the final response
+
+Strategies that also expose the adaptive reply-referencing hooks (``next_turn`` +
+``final_step``, e.g.
+:class:`~injectkit.attacks.multiturn.CrescendoReplyReferencingStrategy`) are
+instead driven turn-by-turn by the engine so each escalation can quote the
+target's real prior reply; see
+:meth:`injectkit.engine.Engine._deliver_adaptive`.
 
 DEFENSIVE / AUTHORIZED USE ONLY. Every built-in strategy keeps the benign canary
 recoverable so success stays a benign-proxy signal, never harmful content.

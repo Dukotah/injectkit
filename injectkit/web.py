@@ -26,6 +26,24 @@ checkbox plus the research-use disclaimer, exactly like the CLI's
 ``--research-benchmark`` / ``--i-am-authorized`` pairing — it never downloads
 anything unless you tick the box.
 
+v0.3.0 additions this layer surfaces (each cited in ``docs/RESEARCH.md``):
+
+* the cipher / art-prompt / self-cipher transforms (CipherChat 2308.06463,
+  ArtPrompt 2402.11753) and the semantic low-resource-language ``translate``
+  transform (2310.02446 / MultiJail 2310.06474) appear in the *mutate* selector.
+  ``translate`` carries a friendly note when its optional offline translator
+  (argostranslate) is absent, exactly like the CLI;
+* the named adaptive attackers — ``pair`` / ``tap`` / ``autodan`` / ``gptfuzzer``
+  (black-box) and ``gcg`` (white-box gradient suffix; AmpleGCG 2404.07921) — are
+  listed in an attacker dropdown for discoverability, with ``gcg`` noting it
+  needs torch/transformers + a HuggingFace target. Like the v0.2.0 adaptive
+  toggle these stay CLI-only to drive (the GUI exposes no attacker-model fields),
+  so the GUI never blocks on a missing local model;
+* the five-class response framework (SoK Prompt Hacking 2410.13901 / StrongREJECT)
+  is surfaced as a per-scan breakdown via
+  :func:`~injectkit.evaluators.response_class.classify_result`, alongside the
+  existing boolean pass/fail.
+
 DEFENSIVE / AUTHORIZED USE ONLY. Only scan endpoints you own or are explicitly
 authorized to test. The server binds to localhost only.
 """
@@ -80,14 +98,89 @@ _TARGET_HELP = {
 }
 
 
+def _dep_available(module: str) -> bool:
+    """True if an optional dependency ``module`` can be imported (no side effects).
+
+    Used to decide whether to show a friendly "needs <dep>" note next to the
+    transforms/attackers that lazy-import a heavy optional dependency
+    (``argostranslate`` for ``translate``, ``torch``/``transformers`` for ``gcg``).
+    Checking the spec never imports the module, so this stays offline and cheap.
+    """
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec(module) is not None
+    except Exception:  # noqa: BLE001 - a broken finder must never crash the GUI
+        return False
+
+
+def _register_v3_transforms() -> None:
+    """Idempotently register the v0.3.0 cipher / art / translate transforms.
+
+    The cipher and translate transforms are NOT auto-registered at import (unlike
+    the encoders), so the GUI registers them here before listing — exactly the
+    integrator seam ``register_builtin_ciphers()`` / ``register_translate()``
+    document. Both calls are idempotent (a name already present is skipped), so
+    calling this on every form render is safe. Registration imports nothing heavy:
+    the translator's argostranslate dep stays lazy until a translate run.
+    """
+    try:
+        from .transforms import register_builtin_ciphers, register_translate
+
+        register_builtin_ciphers()
+        register_translate()
+    except Exception:  # noqa: BLE001 - a registry hiccup must not blank the form
+        pass
+
+
 def _list_transforms() -> list[str]:
-    """Transform names available for the mutate selector (without the no-op)."""
+    """Transform names available for the mutate selector (without the no-op).
+
+    Ensures the v0.3.0 cipher / art / translate transforms are registered first
+    so they appear alongside the v0.2.0 encoders.
+    """
+    _register_v3_transforms()
     try:
         from .transforms.base import list_transforms
 
         return [t for t in list_transforms() if t != "identity"]
     except Exception:  # noqa: BLE001 - the GUI must still render if a registry is empty
         return []
+
+
+#: Transforms whose optional dependency must be present to actually run, mapped to
+#: the importable module that backs them. Shown with a friendly note in the form
+#: when the dep is absent (the transform still lists, like the CLI's ``--mutate``).
+_TRANSFORM_OPTIONAL_DEPS: dict[str, str] = {"translate": "argostranslate"}
+
+
+def _list_attackers() -> list[tuple[str, str, bool]]:
+    """(name, kind, runnable) triples for the named adaptive-attacker dropdown.
+
+    ``runnable`` is False for an attacker whose optional dependency is missing
+    (``gcg`` needs ``torch``/``transformers``) so the form can annotate it. The
+    list is informational: the GUI exposes no attacker-model fields, so driving an
+    attacker stays a CLI flow (``injectkit scan --attacker <name>``), mirroring the
+    v0.2.0 adaptive toggle. A missing/empty registry degrades to an empty list.
+    """
+    try:
+        from .attackers.registry import list_attackers, registry
+    except Exception:  # noqa: BLE001
+        return []
+
+    out: list[tuple[str, str, bool]] = []
+    for name in list_attackers():
+        try:
+            spec = registry.spec(name)
+            kind = spec.kind
+        except Exception:  # noqa: BLE001
+            kind = "black_box"
+        runnable = True
+        if name == "gcg":
+            # white-box GCG needs torch + transformers AND a HuggingFace target.
+            runnable = _dep_available("torch") and _dep_available("transformers")
+        out.append((name, kind, runnable))
+    return out
 
 
 def _list_defenses() -> list[str]:
@@ -134,6 +227,44 @@ def _research_disclaimer() -> str:
             "downloaded from their own official sources for authorized, ethical "
             "research only."
         )
+
+
+#: Human labels + a colour class for each of the five response classes, ordered
+#: worst-for-the-attacker to best. Drives the 5-class breakdown on the scan page.
+_RESPONSE_CLASS_LABELS: tuple[tuple[str, str, str], ...] = (
+    ("reject_irrelevant", "off-task", "good"),
+    ("reject_safety", "refused (safe)", "good"),
+    ("too_long", "truncated", "warn"),
+    ("partial", "partial", "warn"),
+    ("full", "full bypass", "bad"),
+)
+
+
+def _response_class_counts(report: ScanReport) -> dict[str, int]:
+    """Tally a scan report's results into the five graded response classes.
+
+    Uses :func:`~injectkit.evaluators.response_class.classify_result`, the frozen
+    seam that grades a scored result without mutating it: ``full`` coincides with
+    the engine's boolean ``success`` (a strong concrete-proof hit), so the
+    ``full`` count equals the report's vulnerable count for the offline core. The
+    other four classes add fidelity (why a non-success happened) on top of the
+    pass/fail the page already shows. Returns a ``name -> count`` mapping over all
+    five class keys (zeros included). Degrades to an empty mapping if the
+    classifier is unavailable, so the page still renders without the breakdown.
+    """
+    try:
+        from .evaluators.response_class import ResponseClass, classify_result
+    except Exception:  # noqa: BLE001 - the page must render even without the seam
+        return {}
+
+    counts: dict[str, int] = {c.value: 0 for c in ResponseClass}
+    for result in report.results:
+        try:
+            cls = classify_result(result)
+        except Exception:  # noqa: BLE001 - one odd result must not blank the tally
+            continue
+        counts[cls.value] = counts.get(cls.value, 0) + 1
+    return counts
 
 
 # Last rendered HTML report, served at /report and embedded in the results page.
@@ -475,19 +606,38 @@ def form_page(notice: str = "") -> bytes:
     fail = _options(FAIL_ON, "high")
     modes = _options(MODES, "scan")
 
-    # Mutate transform checkboxes (a grid of the registry's transforms).
+    # Mutate transform checkboxes (a grid of the registry's transforms). The
+    # v0.3.0 cipher/art/translate transforms are registered by _list_transforms()
+    # so they appear here; translate is annotated when its offline translator dep
+    # is missing (it still lists, but the note explains it will not run).
     transform_names = _list_transforms()
     if transform_names:
-        mutate = "".join(
-            f"<label><input type=checkbox name=mutate value='{html.escape(t, quote=True)}'> "
-            f"{html.escape(t)}</label>"
-            for t in transform_names
+        labels = []
+        missing_dep = False
+        for t in transform_names:
+            dep = _TRANSFORM_OPTIONAL_DEPS.get(t)
+            note = ""
+            if dep and not _dep_available(dep):
+                note = (
+                    f" <span class=hint>(needs <code>{html.escape(dep)}</code>)</span>"
+                )
+                missing_dep = True
+            labels.append(
+                "<label><input type=checkbox name=mutate "
+                f"value='{html.escape(t, quote=True)}'> {html.escape(t)}{note}</label>"
+            )
+        mutate = "".join(labels)
+        dep_hint = (
+            "<p class=hint>A transform marked <i>needs &lt;dep&gt;</i> lists but "
+            "will not run until you install that optional, offline extra.</p>"
+            if missing_dep
+            else ""
         )
         mutate_block = (
-            "<label>Mutate <span class=hint>(obfuscation transforms — ticking any "
-            "measures robustness against input filtering; identity is always the "
-            "baseline)</span></label>"
-            f"<div class=techs>{mutate}</div>"
+            "<label>Mutate <span class=hint>(obfuscation/semantic transforms — "
+            "ticking any measures robustness against input filtering; identity is "
+            "always the baseline)</span></label>"
+            f"<div class=techs>{mutate}</div>{dep_hint}"
         )
     else:
         mutate_block = ""
@@ -505,6 +655,43 @@ def form_page(notice: str = "") -> bytes:
         f"<option value='{html.escape(s, quote=True)}'>{html.escape(s)}</option>"
         for s in mt_strategies
     )
+
+    # Named adaptive-attacker dropdown (v0.3.0). Informational: the GUI exposes no
+    # attacker-model fields, so the dropdown stays disabled (drive an attacker
+    # from the CLI). gcg is annotated when torch/transformers is missing.
+    attackers = _list_attackers()
+    if attackers:
+        opts = []
+        attacker_dep_note = False
+        for name, kind, runnable in attackers:
+            extra = "" if runnable else " — needs torch/transformers"
+            if not runnable:
+                attacker_dep_note = True
+            opts.append(
+                f"<option value='{html.escape(name, quote=True)}'>"
+                f"{html.escape(name)} ({html.escape(kind)}){extra}</option>"
+            )
+        attacker_select = (
+            "<div style='margin-top:10px'><label>Adaptive attacker strategy "
+            "<span class=hint>(named automated red-teamers)</span></label>"
+            "<select name=attacker disabled style='max-width:340px'>"
+            f"{''.join(opts)}</select>"
+            "<p class=hint>pair/tap/autodan/gptfuzzer drive a local attacker model; "
+            "<b>gcg</b> is a white-box gradient suffix (HuggingFace target only). "
+            "All optimise toward the <b>benign canary</b> marker, never harmful "
+            "content. <b>CLI-only</b>: run <code>injectkit scan --attacker &lt;name&gt;"
+            "</code> &mdash; the GUI exposes no attacker-model fields, so this stays "
+            "informational here."
+            + (
+                " <i>gcg needs the optional <code>torch</code>/<code>transformers"
+                "</code> extra installed to run.</i>"
+                if attacker_dep_note
+                else ""
+            )
+            + "</p></div>"
+        )
+    else:
+        attacker_select = ""
 
     # Per-target config hints rendered as a small legend so the user knows what
     # the URL/model fields mean for each kind.
@@ -591,6 +778,7 @@ def form_page(notice: str = "") -> bytes:
         "<code>injectkit scan --adaptive</code> with a local attacker model. The "
         "GUI exposes no attacker-model fields, so this stays disabled here.</label>"
         "</div>"
+        f"{attacker_select}"
         "</fieldset>"
         # ---- judge ----
         "<div class=chk><input type=checkbox name=judge value=1 id=judge>"
@@ -638,6 +826,25 @@ def results_page(report: ScanReport) -> bytes:
         else ""
     )
 
+    # 5-class response breakdown (v0.3.0): grade every result into one of the five
+    # classes. `full` coincides with the boolean vulnerable count; the rest add
+    # fidelity (why a non-success happened). Only rendered when the seam is present.
+    class_counts = _response_class_counts(report)
+    if class_counts:
+        cells = "".join(
+            f"<div class=stat><div class='n {cls}'>{class_counts.get(key, 0)}</div>"
+            f"<div class=l>{html.escape(label)}</div></div>"
+            for key, label, cls in _RESPONSE_CLASS_LABELS
+        )
+        class_block = (
+            "<p class=hint style='margin-top:8px'>5-class response breakdown "
+            "<span class=hint>(SoK Prompt Hacking 2410.13901 / StrongREJECT; "
+            "<b>full</b> = a benign-canary bypass = the vulnerable count)</span></p>"
+            f"<div class=summary>{cells}</div>"
+        )
+    else:
+        class_block = ""
+
     return _page(
         "<h1>Scan results</h1>"
         f"<p class=sub>Target: <code>{html.escape(report.target_name)}</code>"
@@ -651,6 +858,7 @@ def results_page(report: ScanReport) -> bytes:
         f"{errored_stat}"
         f"<div class=stat><div class='n {fcls}'>{html.escape(worst_s)}</div><div class=l>worst severity</div></div>"
         "</div>"
+        f"{class_block}"
         "<p><a href='/'>&larr; New run</a> &nbsp;&middot;&nbsp; "
         "<a href='/report' target=_blank>open full report in a new tab</a></p>"
         "<iframe src='/report' title='injectkit report'></iframe>"

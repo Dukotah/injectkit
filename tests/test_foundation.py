@@ -32,7 +32,7 @@ BUNDLED_CORPUS = os.path.join(os.path.dirname(injectkit.__file__), "corpus")
 
 
 def test_version_and_exports() -> None:
-    assert injectkit.__version__ == "0.2.0"
+    assert injectkit.__version__ == "0.3.0"
     # Public exports are all importable from the root.
     for name in (Attack, AttackResult, Finding, ScanReport, Severity, Verdict,
                  TargetResponse, DetectorVerdict, TargetConfig):

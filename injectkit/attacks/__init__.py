@@ -24,6 +24,7 @@ from .base import (
 from .multiturn import (
     MULTI_TURN_STRATEGIES,
     ContextOverflowStrategy,
+    CrescendoReplyReferencingStrategy,
     CrescendoStrategy,
     ManyShotStrategy,
     PersonaPrimingStrategy,
@@ -38,6 +39,7 @@ __all__ = [
     "StrategyError",
     "attack_to_strategy",
     "CrescendoStrategy",
+    "CrescendoReplyReferencingStrategy",
     "ManyShotStrategy",
     "ContextOverflowStrategy",
     "PersonaPrimingStrategy",

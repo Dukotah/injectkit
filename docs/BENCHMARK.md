@@ -1,4 +1,4 @@
-# injectkit Benchmark Methodology (v0.2.0)
+# injectkit Benchmark Methodology (v0.3.0)
 
 > DEFENSIVE / AUTHORIZED USE ONLY. The benchmark measures **attack-success rate
 > (ASR)** against a target you own or are explicitly authorized to test, using
@@ -33,6 +33,24 @@ This is the standard ASR methodology used across the prompt-injection /
 jailbreak literature (AdvBench, HarmBench, JailbreakBench), applied to the benign
 canary proxy instead of harmful behaviors.
 
+> **Honest baselines.** Lower ASR is the *defender* winning, and a robust
+> frontier model legitimately scores near zero — the survey
+> ([`RESEARCH.md`](./RESEARCH.md)) verifies that the "90%+ even on flagship aligned
+> models" narrative is **overstated** (those high numbers are GPT-4-era / open /
+> mid-tier). injectkit's value is *measuring* robustness — including proving a
+> model is robust — so set expected-bypass baselines accordingly.
+
+### Grading: boolean bypass vs 5-class scoring
+
+A "success" is still the boolean bypass the ASR formula counts. v0.3.0 adds an
+optional **5-class grade** per reply (`evaluators/response_class.py::ResponseClass`
+— `reject_irrelevant` / `reject_safety` / `too_long` / `partial` / `full`; SoK
+Prompt Hacking arXiv:2410.13901; StrongREJECT) for richer ASR fidelity. The boolean
+remains **derivable** and frozen: `is_success` is True only for `full`, so the ASR
+numerator is unchanged. The extra classes explain *why* a non-success happened
+(safety refusal vs off-task vs length-capped) without moving the headline. See
+[`TAXONOMY.md`](./TAXONOMY.md) Axis 5 for the full mapping.
+
 ## 2. The data model (`injectkit/benchmark.py`)
 
 | Type | Role |
@@ -65,10 +83,26 @@ taxonomy) and records one `ASRCell` per cell of the resulting grid:
   `data_exfiltration`.
 - **Transforms** (obfuscation/restructuring modifiers): `identity` (baseline),
   encodings, unicode tricks, framing, splitting — each a canary-preserving
-  `Transform` from `injectkit/transforms/`.
+  `Transform` from `injectkit/transforms/`. v0.3.0 adds the cipher family
+  (`caesar` / `atbash` / `morse` / `unicode_escape` / `artprompt` / `selfcipher`
+  — CipherChat 2308.06463, ArtPrompt 2402.11753) and the semantic `translate`
+  transform (low-resource translation, 2310.02446 / MultiJail 2310.06474), so the
+  obfuscation axis now spans byte/char encodings, ciphers, ASCII-art, and a
+  *semantic* low-resource translation. See [`TAXONOMY.md`](./TAXONOMY.md) Axis 2.
 - **Defenses** evaluated as ASR-with vs ASR-without: `none` (undefended
   baseline) plus the mitigations registered in `injectkit/defenses/`
   (`hardened_system`, `sandwich`, `input_sanitizer`, `output_filter`).
+
+Two further axes are optional inputs to the same grid rather than rollup groups:
+
+- **Delivery** (`--multiturn`): single-shot (default) or a multi-turn strategy,
+  including the v0.3.0 `crescendo_reply` (reply-referencing crescendo) and
+  `crescendo_decompose` (agent-decomposition crescendo) variants (2404.01833).
+- **Attacker** (`--attacker`): the adaptive propose/refine loop, including the
+  v0.3.0 named attackers `pair` / `tap` / `autodan` / `gptfuzzer` (black-box) and
+  `gcg` (white-box, HF-only). All optimise toward the benign canary; the
+  `attacker_model` and `used_judge` flags are stamped into the metadata because
+  they change the numbers. See [`TAXONOMY.md`](./TAXONOMY.md) Axis 3/3b.
 
 The interesting numbers are the **deltas**: ASR with a transform vs without
 (does the obfuscation get past your filter?) and ASR with a defense vs the `none`
