@@ -8,5 +8,17 @@ importing this package never requires anthropic/mcp/httpx to be installed.
 from __future__ import annotations
 
 from .base import Target
+from .conversational import (
+    ChatMessage,
+    ConversationalTarget,
+    SingleShotChatAdapter,
+    as_conversational,
+)
 
-__all__ = ["Target"]
+__all__ = [
+    "Target",
+    "ChatMessage",
+    "ConversationalTarget",
+    "SingleShotChatAdapter",
+    "as_conversational",
+]

@@ -195,3 +195,125 @@ def sample_report(sample_attack: Attack) -> ScanReport:
         findings=[finding],
         finished_at=None,
     )
+
+
+# --------------------------------------------------------------------------- #
+# v0.2.0 shared stubs: a scripted local/attacker model and a fake conversational
+# target. All offline and deterministic — the new modules (transforms,
+# attackers, multi-turn strategies, benchmark) test against these.
+# --------------------------------------------------------------------------- #
+
+
+class StubLocalModel:
+    """A scripted, offline stand-in for a local/attacker model.
+
+    Satisfies the :class:`~injectkit.attackers.base.AttackerModel` protocol
+    (``name`` + ``generate``). It returns canned responses with zero network or
+    SDK use, so the adaptive attacker and any local-model code can be exercised
+    deterministically.
+
+    Args:
+        name: Model identifier reported in metadata.
+        responses: Ordered scripted completions. Each ``generate`` call pops the
+            next one; when exhausted, ``default`` is returned. ``{n}`` in a
+            scripted/`default` string is replaced with the 1-based call count, so
+            an attacker loop produces a distinct payload each round.
+        default: Fallback completion once ``responses`` is exhausted.
+    """
+
+    def __init__(
+        self,
+        name: str = "stub-local",
+        responses: Optional[list[str]] = None,
+        default: str = "candidate payload {n}",
+    ) -> None:
+        self.name = name
+        self._responses = list(responses or [])
+        self.default = default
+        # Records every prompt the model was asked to complete, for assertions.
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str, *, system: Optional[str] = None) -> str:
+        """Return the next scripted completion (offline, deterministic)."""
+        self.prompts.append(prompt)
+        n = len(self.prompts)
+        if self._responses:
+            template = self._responses.pop(0)
+        else:
+            template = self.default
+        return template.replace("{n}", str(n))
+
+
+class FakeConversationalTarget:
+    """A deterministic multi-turn target for tests.
+
+    Satisfies the
+    :class:`~injectkit.targets.conversational.ConversationalTarget` protocol
+    (``name`` + ``chat``). It echoes the success marker from the latest user turn
+    when ``vulnerable`` is True (so multi-turn strategies score a hit), refuses
+    when ``vulnerable`` is False, and records every conversation it received.
+
+    Args:
+        name: Display name.
+        trigger: Marker prefix that, when present in the latest user turn, makes
+            the target "comply" and echo the marker (carrying the canary).
+        vulnerable: When False, the target refuses every conversation.
+    """
+
+    def __init__(
+        self,
+        name: str = "fake-chat",
+        trigger: str = "INJECTOK-",
+        vulnerable: bool = True,
+    ) -> None:
+        self.name = name
+        self.trigger = trigger
+        self.vulnerable = vulnerable
+        # Each entry: {"messages": [(role, content), ...], "system": str|None}.
+        self.conversations: list[dict] = []
+
+    def chat(self, messages, system: Optional[str] = None) -> TargetResponse:
+        """Respond to the latest user turn deterministically."""
+        self.conversations.append(
+            {
+                "messages": [(m.role, m.content) for m in messages],
+                "system": system,
+            }
+        )
+        if not self.vulnerable:
+            return TargetResponse(
+                text="I can't help with that.",
+                refused=True,
+                stop_reason="refusal",
+                model=self.name,
+            )
+        last_user = ""
+        for m in messages:
+            if m.role == "user":
+                last_user = m.content
+        match = re.search(re.escape(self.trigger) + r"[A-Za-z0-9_-]+", last_user)
+        if match:
+            return TargetResponse(
+                text=match.group(0),
+                refused=False,
+                stop_reason="end_turn",
+                model=self.name,
+            )
+        return TargetResponse(
+            text="On-task answer.",
+            refused=False,
+            stop_reason="end_turn",
+            model=self.name,
+        )
+
+
+@pytest.fixture
+def stub_local_model() -> StubLocalModel:
+    """A fresh scripted local/attacker model (offline)."""
+    return StubLocalModel()
+
+
+@pytest.fixture
+def fake_conversational_target() -> FakeConversationalTarget:
+    """A fresh vulnerable multi-turn target."""
+    return FakeConversationalTarget()

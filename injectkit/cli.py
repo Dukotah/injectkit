@@ -7,11 +7,23 @@ subcommands:
 
   * ``scan`` — load the corpus, run every attack against the configured target,
     render a report, and exit non-zero when any finding meets the ``--fail-on``
-    severity threshold (the CI gate).
+    severity threshold (the CI gate). v0.2.0 adds optional ``--mutate`` (apply
+    obfuscation transforms), ``--defense`` (wrap the target in a mitigation),
+    ``--multiturn`` (deliver each attack as a conversational strategy), and
+    ``--adaptive`` (refine each attack with a local attacker model).
+  * ``bench`` — run the ASR benchmark/scorecard: sweep the corpus across
+    transforms and defenses and emit a per-technique, per-defense
+    attack-success-rate scorecard with a reproducibility stamp.
   * ``list`` — list the attacks in the corpus (optionally filtered by technique),
     so users can see what will run without sending anything.
   * ``init`` — write a starter ``.injectkit.yaml`` so users can configure a
     target without reading the docs.
+
+The ``--research-benchmark`` flag (on ``bench``) is GATED: it loads an official
+public academic dataset (downloaded from its own source, never bundled) and
+refuses unless the user also passes ``--i-am-authorized`` (or sets the
+``INJECTKIT_RESEARCH_ACK`` env var). The research-use disclaimer is printed
+before anything is loaded.
 
 DEFENSIVE / AUTHORIZED USE ONLY. injectkit scans LLM endpoints you own or are
 explicitly authorized to test — the "scan your own site" posture. The
@@ -60,11 +72,18 @@ _EPILOG = (
 # (rich is core, but keeping the import local keeps the surface tidy and fast).
 _REPORT_FORMATS = ("terminal", "json", "markdown", "sarif", "html")
 
-# Valid --target kinds the CLI knows how to construct.
-_TARGET_KINDS = ("http", "anthropic", "mcp", "mock")
+# Valid --target kinds the CLI knows how to construct. v0.2.0 adds three local
+# (no-API-key) model adapters: ollama (local ollama serve), openai
+# (OpenAI-compatible local server, e.g. vLLM/LM Studio), and hf (in-process
+# HuggingFace transformers). Each lazy-imports its optional dependency.
+_TARGET_KINDS = ("http", "anthropic", "mcp", "mock", "ollama", "openai", "hf")
+
+# Scorecard report formats for the `bench` subcommand (distinct from the scan
+# report formats — these render a BenchmarkResult, not a ScanReport).
+_BENCH_FORMATS = ("terminal", "json", "markdown", "html")
 
 # Exit codes (documented so CI authors can rely on them).
-EXIT_OK = 0  # scan ran; no finding met --fail-on
+EXIT_OK = 0  # scan ran; no finding met --fail-on (or bench ran cleanly)
 EXIT_FINDINGS = 1  # scan ran; at least one finding met/exceeded --fail-on
 EXIT_ERROR = 2  # the scan could not run (config/corpus/target setup error)
 
@@ -90,10 +109,13 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"injectkit {__version__}",
     )
 
-    sub = parser.add_subparsers(dest="command", metavar="{scan,list,init,gui}")
+    sub = parser.add_subparsers(
+        dest="command", metavar="{scan,bench,list,init,gui}"
+    )
     sub.required = True
 
     _add_scan_parser(sub)
+    _add_bench_parser(sub)
     _add_list_parser(sub)
     _add_init_parser(sub)
     _add_gui_parser(sub)
@@ -177,6 +199,147 @@ def _add_scan_parser(sub: argparse._SubParsersAction) -> None:
         metavar="FILE",
         help="Write the report to this file instead of stdout.",
     )
+    _add_robustness_args(p)
+
+
+# --------------------------------------------------------------------------- #
+# v0.2.0 robustness flags shared by `scan` and `bench`.
+# --------------------------------------------------------------------------- #
+def _add_robustness_args(p: argparse.ArgumentParser) -> None:
+    """Add the transform/defense/multiturn/adaptive flags to a subparser.
+
+    These wrap the target before the scan/benchmark runs: ``--mutate`` applies
+    obfuscation transforms (so an attack's robustness against input filtering is
+    measured), ``--defense`` wraps the target in a mitigation, ``--multiturn``
+    delivers each attack as a conversational strategy, and ``--adaptive`` refines
+    each attack with a local attacker model. All preserve the benign-canary proxy.
+    """
+    p.add_argument(
+        "--mutate",
+        metavar="NAMES",
+        help="Apply one or more obfuscation transforms to each attack payload "
+        "(comma-separated, applied in order; e.g. 'base64' or 'rot13,zero_width'). "
+        "Use 'all' to sweep every built-in transform. The unmodified payload "
+        "(identity) is always measured as the baseline.",
+    )
+    p.add_argument(
+        "--defense",
+        metavar="NAME",
+        help="Wrap the target in a mitigation defense before scoring (e.g. "
+        "'hardened_system', 'sandwich', 'input_sanitizer', 'output_filter'). "
+        "Measures attack-success-rate WITH the defense. Default: none.",
+    )
+    p.add_argument(
+        "--multiturn",
+        metavar="STRATEGY",
+        nargs="?",
+        const="crescendo",
+        help="Deliver each attack as a multi-turn conversation using STRATEGY "
+        "(crescendo | many_shot | context_overflow | persona_priming). "
+        "Default strategy if the flag is given with no value: crescendo.",
+    )
+    p.add_argument(
+        "--adaptive",
+        action="store_true",
+        help="Refine each attack with a local adaptive attacker model "
+        "(local-model-first; structure-only, benign-canary objective). Needs a "
+        "local attacker model (see --attacker-target/--attacker-model).",
+    )
+    p.add_argument(
+        "--attacker-target",
+        choices=("ollama",),
+        default="ollama",
+        help="Adaptive attacker backend (currently: ollama, a local Ollama "
+        "server, no API key). Default: ollama.",
+    )
+    p.add_argument(
+        "--attacker-model",
+        metavar="MODEL",
+        help="Model id for the adaptive attacker (e.g. 'llama3.1'). "
+        "Default: the attacker backend's default.",
+    )
+    p.add_argument(
+        "--max-rounds",
+        type=int,
+        default=5,
+        help="Hard round budget for the adaptive attacker (default: 5).",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="RNG seed for seeded transforms/attacker (recorded for "
+        "reproducibility).",
+    )
+
+
+def _add_bench_parser(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "bench",
+        help="Benchmark a target's attack-success-rate (ASR scorecard).",
+        description="Sweep the attack corpus across transforms and defenses and "
+        "emit a per-technique, per-defense ASR scorecard with a reproducibility "
+        "stamp (the robustness leaderboard). ASR is the benign-canary proxy.",
+        epilog=_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_common_corpus_args(p)
+    p.add_argument(
+        "--target",
+        choices=_TARGET_KINDS,
+        help="Target adapter kind. Overrides the config's target.kind.",
+    )
+    p.add_argument("--url", help="Endpoint URL / server base URL for the target.")
+    p.add_argument("--model", help="Model id for the target.")
+    p.add_argument(
+        "--system",
+        help="Default system prompt to send with attacks that don't carry one.",
+    )
+    p.add_argument(
+        "--judge",
+        action="store_true",
+        default=None,
+        help="Enable the optional LLM judge (needs the 'anthropic' SDK + key).",
+    )
+    p.add_argument(
+        "--judge-model",
+        metavar="MODEL",
+        help=f"Judge model id (default: {DEFAULT_JUDGE_MODEL}).",
+    )
+    p.add_argument(
+        "--format",
+        choices=_BENCH_FORMATS,
+        default="terminal",
+        help="Scorecard format (default: terminal).",
+    )
+    p.add_argument(
+        "--out",
+        metavar="FILE",
+        help="Write the scorecard to this file instead of stdout.",
+    )
+    p.add_argument(
+        "--research-benchmark",
+        metavar="DATASET",
+        help="GATED: benchmark against an official public research dataset "
+        "(advbench | harmbench | jailbreakbench | in_the_wild_jailbreaks | "
+        "tensor_trust). Downloads from the dataset's OWN source (never bundled) "
+        "and REQUIRES --i-am-authorized. Prints the research-use disclaimer.",
+    )
+    p.add_argument(
+        "--i-am-authorized",
+        action="store_true",
+        help="Acknowledge the research-use terms (required for "
+        "--research-benchmark). You confirm authorized, ethical, research-only "
+        "use against a target you own or are permitted to test.",
+    )
+    p.add_argument(
+        "--research-limit",
+        type=int,
+        default=25,
+        metavar="N",
+        help="Cap the number of research-dataset behaviors loaded (default: 25).",
+    )
+    _add_robustness_args(p)
 
 
 def _add_list_parser(sub: argparse._SubParsersAction) -> None:
@@ -339,6 +502,18 @@ def _build_target(config: Config):
         from .targets.mcp import MCPTarget
 
         return MCPTarget.from_config(config.target)
+    if kind == "ollama":
+        from .targets.ollama import OllamaTarget
+
+        return OllamaTarget.from_config(config.target)
+    if kind == "openai":
+        from .targets.openai_compat import OpenAICompatTarget
+
+        return OpenAICompatTarget.from_config(config.target)
+    if kind == "hf":
+        from .targets.hf import HFTarget
+
+        return HFTarget.from_config(config.target)
     if kind == "mock":
         # An offline, deterministic target for demos/CI smoke tests. Imported
         # from the engine-agnostic helper so it works without a network.
@@ -475,6 +650,7 @@ def _cmd_scan(args: argparse.Namespace, *, out: object, err: object) -> int:
     try:
         target = _build_target(config)
         detectors = _build_detectors(config)
+        target = _apply_scan_robustness(target, detectors, args, config)
     except (ScanError, ValueError) as exc:
         print(f"injectkit: target setup error: {exc}", file=err)
         return EXIT_ERROR
@@ -539,6 +715,212 @@ def _cmd_scan(args: argparse.Namespace, *, out: object, err: object) -> int:
             file=err,
         )
         return EXIT_FINDINGS
+    return EXIT_OK
+
+
+def _apply_scan_robustness(
+    target: object,
+    detectors: list,
+    args: argparse.Namespace,
+    config: Config,
+):
+    """Wrap ``target`` per the scan's robustness flags (mutate/defense/multiturn/adaptive).
+
+    For ``scan`` the robustness axes are applied as target wrappers so the
+    existing single-pass engine/scoring/Finding path is reused unchanged:
+
+      * ``--mutate`` wraps the target so each rendered payload is obfuscated (a
+        comma-separated list is applied in order as one composed transform).
+      * ``--defense`` wraps the target in a mitigation (its three hooks run in the
+        engine-contract order).
+      * ``--multiturn`` wraps the target so each attack is delivered as a
+        conversation; the scored turn's response flows back into scoring.
+      * ``--adaptive`` wraps the target so each attack is first refined by the
+        local adaptive attacker and the best round's response is scored.
+
+    All preserve the benign-canary proxy (the wrappers recover the per-run canary
+    the engine planted). Returns the wrapped target. Raises :class:`ScanError`
+    on any unknown name / missing optional dependency.
+    """
+    from . import cli_robustness as cr
+
+    robustness = cr.resolve_robustness(args, detectors=detectors)
+
+    # Apply (innermost first): defense, then transform, then multi-turn delivery,
+    # then adaptive refinement so the strongest probe reaches a defended target.
+    if robustness.defenses:
+        from .benchmark_runner import _DefendedTarget
+
+        # scan applies the FIRST named defense (a sweep is the bench's job).
+        target = _DefendedTarget(target, robustness.defenses[0])
+    if robustness.transforms:
+        from .benchmark_runner import _TransformingTarget
+
+        target = _TransformingTarget(target, robustness.transforms[0])
+    if robustness.strategy is not None:
+        target = cr.wrap_target_for_multiturn(target, robustness.strategy)
+    if robustness.attacker is not None:
+        target = _wrap_target_for_adaptive(target, detectors, robustness.attacker)
+    return target
+
+
+def _wrap_target_for_adaptive(target: object, detectors: list, attacker: object):
+    """Wrap a target so each attack is refined by the adaptive attacker first.
+
+    On each ``send`` the wrapper reconstructs the benign-canary seed attack from
+    the engine-rendered prompt, runs the attacker for its bounded budget, and
+    returns the best round's response so the engine scores the strongest probe.
+    A setup fault (e.g. the attacker model dependency is missing) degrades to the
+    untouched single-shot send rather than aborting the scan.
+    """
+    import re as _re
+
+    from .models import Attack as _Attack
+    from .models import Severity as _Severity
+    from .models import TargetResponse as _TargetResponse
+
+    marker_re = _re.compile(r"INJECTOK-([A-Za-z0-9_-]+)")
+
+    class _AdaptiveTarget:
+        name = getattr(target, "name", "target")
+
+        def send(self, prompt, system=None, context=None):
+            seed = _Attack(
+                id="adaptive",
+                technique="adaptive",
+                name="adaptive",
+                description="",
+                severity=_Severity.HIGH,
+                payload=prompt,
+                system=system,
+                success_conditions={"marker_echoed": True, "refusal_absent": True},
+            )
+            try:
+                outcome = attacker.run(seed, target, detectors)
+            except Exception:  # noqa: BLE001 - adaptive setup faults degrade to single-shot
+                return target.send(prompt, system=system, context=context)
+            best = getattr(outcome, "best_result", None)
+            resp = getattr(best, "response", None)
+            if isinstance(resp, _TargetResponse):
+                return resp
+            return target.send(prompt, system=system, context=context)
+
+    return _AdaptiveTarget()
+
+
+def _cmd_bench(args: argparse.Namespace, *, out: object, err: object) -> int:
+    """Run the ``bench`` subcommand: the ASR benchmark / robustness scorecard."""
+    from . import cli_robustness as cr
+    from .research.base import ResearchAcknowledgmentError
+
+    # --- research-benchmark gate (printed BEFORE any load) --------------------
+    research_dataset = getattr(args, "research_benchmark", None)
+    if research_dataset:
+        from .research.base import RESEARCH_DISCLAIMER
+
+        print(RESEARCH_DISCLAIMER, file=err)
+        print("", file=err)
+        if not getattr(args, "i_am_authorized", False):
+            # Honour the env-var opt-in too, but if neither is set, refuse loudly.
+            import os as _os
+
+            from .research.base import RESEARCH_ACK_ENV
+
+            env = _os.environ.get(RESEARCH_ACK_ENV, "").strip().lower()
+            if env not in {"1", "true", "yes", "on"}:
+                print(
+                    "injectkit: --research-benchmark is gated. Re-run with "
+                    "--i-am-authorized to confirm authorized, ethical, "
+                    f"research-only use (or set {RESEARCH_ACK_ENV}=1).",
+                    file=err,
+                )
+                return EXIT_ERROR
+
+    try:
+        config = _load_config_for(args)
+    except (ValueError, OSError) as exc:
+        print(f"injectkit: config error: {exc}", file=err)
+        return EXIT_ERROR
+
+    # --- load attacks: corpus, or the gated research dataset ------------------
+    try:
+        if research_dataset:
+            attacks = cr.load_research_attacks(
+                research_dataset,
+                acknowledge=bool(getattr(args, "i_am_authorized", False)),
+                limit=getattr(args, "research_limit", 25),
+            )
+        else:
+            attacks = _load_attacks(config)
+    except ResearchAcknowledgmentError as exc:
+        print(f"injectkit: {exc}", file=err)
+        return EXIT_ERROR
+    except CorpusError as exc:
+        print(f"injectkit: corpus error: {exc}", file=err)
+        return EXIT_ERROR
+    except (ScanError, ValueError, OSError) as exc:
+        print(f"injectkit: {exc}", file=err)
+        return EXIT_ERROR
+    except Exception as exc:  # noqa: BLE001 - research download/parse faults
+        print(f"injectkit: research benchmark error: {exc}", file=err)
+        return EXIT_ERROR
+
+    if not attacks:
+        print("injectkit: no attacks matched (corpus empty or filter excluded all).", file=err)
+        return EXIT_ERROR
+
+    # --- build target + detectors + resolve robustness axes -------------------
+    try:
+        target = _build_target(config)
+        detectors = _build_detectors(config)
+        robustness = cr.resolve_robustness(args, detectors=detectors)
+    except (ScanError, ValueError) as exc:
+        print(f"injectkit: setup error: {exc}", file=err)
+        return EXIT_ERROR
+
+    # --- run the sweep --------------------------------------------------------
+    try:
+        result = cr.run_bench(
+            target=target,
+            detectors=detectors,
+            attacks=attacks,
+            robustness=robustness,
+            use_judge=config.use_judge,
+            tool_version=__version__,
+        )
+    except ScanError as exc:
+        print(f"injectkit: {exc}", file=err)
+        return EXIT_ERROR
+
+    # --- render + emit the scorecard ------------------------------------------
+    try:
+        reporter = cr.build_bench_reporter(getattr(args, "format", "terminal"))
+        rendered = reporter.render(result)
+    except ScanError as exc:
+        print(f"injectkit: report error: {exc}", file=err)
+        return EXIT_ERROR
+
+    out_path = getattr(args, "out", None)
+    if out_path:
+        try:
+            _write_text(out_path, rendered)
+        except OSError as exc:
+            print(f"injectkit: could not write scorecard: {exc}", file=err)
+            return EXIT_ERROR
+        print(
+            f"injectkit: wrote {getattr(args, 'format', 'terminal')} scorecard to {out_path}",
+            file=err,
+        )
+    else:
+        print(rendered, file=out)
+
+    overall = result.overall("none")
+    if overall is not None and overall.attempts == 0 and overall.errored > 0:
+        print(
+            "injectkit: WARNING: target unreachable — every attack errored; the "
+            "ASR could not be measured (not a robust pass).",
+            file=err,
+        )
     return EXIT_OK
 
 
@@ -627,7 +1009,10 @@ _STARTER_CONFIG = """\
 # List the attacks with:  injectkit list
 
 target:
-  # kind: one of anthropic | http | mcp | mock
+  # kind: one of anthropic | http | mcp | mock | ollama | openai | hf
+  #   ollama/openai/hf are local, no-API-key model targets (offline-first):
+  #   ollama (local `ollama serve`), openai (OpenAI-compatible local server such
+  #   as vLLM/LM Studio), hf (in-process HuggingFace transformers).
   kind: anthropic
   # Display name shown in the report header.
   name: my-app
@@ -695,6 +1080,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "scan":
         return _cmd_scan(args, out=out, err=err)
+    if args.command == "bench":
+        return _cmd_bench(args, out=out, err=err)
     if args.command == "list":
         return _cmd_list(args, out=out, err=err)
     if args.command == "init":

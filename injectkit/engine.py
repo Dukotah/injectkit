@@ -19,17 +19,28 @@ caller hands it; injectkit's posture is "scan your own endpoint". Construction
 of targets/detectors from config (which is where keys/URLs come from) lives in
 the CLI and the adapters, not here.
 
-The engine is deliberately small and dependency-light: it imports only the core
-models, the heuristic detector, and the scoring helper. The optional LLM judge
-and the heavy target SDKs are wired in by the caller (the CLI), so importing the
-engine never pulls in an optional dependency.
+The engine is deliberately small and dependency-light: at import time it pulls
+in only the core models, the heuristic detector, and the scoring helper. The
+optional LLM judge and the heavy target SDKs are wired in by the caller (the
+CLI), so importing the engine never pulls in an optional dependency.
+
+v0.2.0 extends the engine with first-class orchestration of the new building
+blocks — payload **transforms**, multi-turn attack **strategies** against a
+:class:`~injectkit.targets.conversational.ConversationalTarget`, the local
+**adaptive attacker**, **defense** wrapping, and the reproducible ASR
+**benchmark**. Every one of those siblings (transforms, attacks, attackers,
+defenses, benchmark, conversational target) is imported *lazily* inside the
+method that uses it, so the single-shot scan path — and ``import
+injectkit.engine`` — stays exactly as cheap and dependency-light as in v0.1.0.
+All extensions preserve the benign-canary proxy: a "success" is still the target
+echoing the per-run marker it was told to withhold, never harmful content.
 """
 
 from __future__ import annotations
 
 import time
 import uuid
-from typing import Callable, Iterable, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence
 
 from .models import (
     Attack,
@@ -39,9 +50,17 @@ from .models import (
     TargetResponse,
 )
 from .evaluators.base import Detector
-from .evaluators.heuristics import HeuristicDetector
+from .evaluators.heuristics import DEFAULT_TRIGGER, HeuristicDetector
 from .evaluators.scoring import score
 from .targets.base import Target
+
+if TYPE_CHECKING:  # imported lazily at runtime; only needed for annotations here
+    from .attackers.base import AdaptiveAttacker, AttackerResult
+    from .attacks.base import AttackStep, AttackStrategy
+    from .benchmark import BenchmarkResult
+    from .defenses.base import Defense
+    from .targets.conversational import ChatMessage, ConversationalTarget
+    from .transforms.base import Transform
 
 __all__ = ["Engine", "run_scan", "make_canary", "ScanError"]
 
@@ -81,6 +100,11 @@ class Engine:
         on_result: Optional callback invoked with each scored
             :class:`AttackResult` as it completes (for live progress output).
         tool_version: Version string stamped on the report.
+        trigger: Success-marker prefix the benign-proxy attacks use (default
+            ``INJECTOK-``). Used by the v0.2.0 transform path to recover the
+            per-run canary from a rendered prompt, so an encoder transform can
+            keep the marker recoverable. The single-shot scan path does not use
+            it (the detectors carry their own trigger).
     """
 
     def __init__(
@@ -92,6 +116,7 @@ class Engine:
         canary_factory: Callable[[], str] = make_canary,
         on_result: Optional[Callable[[AttackResult], None]] = None,
         tool_version: str = "0.1.0",
+        trigger: str = DEFAULT_TRIGGER,
     ) -> None:
         self.target = target
         self.detectors: list[Detector] = (
@@ -103,6 +128,7 @@ class Engine:
         self.canary_factory = canary_factory
         self.on_result = on_result
         self.tool_version = tool_version
+        self.trigger = trigger
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -178,6 +204,400 @@ class Engine:
             duration_s=duration,
         )
         return score(result, use_judge=self.use_judge)
+
+    # ------------------------------------------------------------------ #
+    # v0.2.0 — multi-turn strategies
+    # ------------------------------------------------------------------ #
+
+    def run_strategy(
+        self,
+        attack: Attack,
+        strategy: Optional["AttackStrategy"] = None,
+    ) -> AttackResult:
+        """Run one attack as a multi-turn conversation and score the scored turn.
+
+        Drives an :class:`~injectkit.attacks.base.AttackStrategy` against the
+        engine's target adapted to a
+        :class:`~injectkit.targets.conversational.ConversationalTarget`. The
+        strategy builds an ordered list of
+        :class:`~injectkit.attacks.base.AttackStep` turns; the engine delivers
+        the history turns (``expect_response`` ones are sent and their replies
+        captured; scripted turns are inserted verbatim) and scores the response
+        to the single ``scored=True`` step.
+
+        A single-shot attack with no strategy uses
+        :func:`~injectkit.attacks.base.attack_to_strategy` (the default
+        :class:`SingleShotStrategy`), so this method is a strict superset of
+        :meth:`run_one` for the conversational path.
+
+        Args:
+            attack: The (scored) attack whose ``payload`` carries the ``{canary}``
+                marker. Its ``system`` is rendered with the live canary and
+                applied to the whole conversation.
+            strategy: The strategy that builds the turn sequence. Defaults to the
+                single-shot strategy for ``attack``.
+
+        Returns:
+            A scored :class:`AttackResult` for the conversation's final
+            (scored) turn. Never raises on a target/strategy fault — a strategy
+            that raises yields an errored result; a misbehaving target yields an
+            errored response.
+        """
+        # Lazy imports keep the single-shot path / `import engine` light.
+        from .attacks.base import StrategyError, attack_to_strategy
+        from .targets.conversational import as_conversational
+
+        if strategy is None:
+            strategy = attack_to_strategy(attack)
+
+        canary = self.canary_factory()
+        system = self._render_optional(attack.system, canary)
+        conv = as_conversational(self.target)
+
+        start = time.perf_counter()
+        try:
+            steps = strategy.build(attack, canary)
+        except StrategyError as exc:
+            response = TargetResponse(
+                text="",
+                error=f"strategy.build raised StrategyError: {exc}",
+            )
+            return self._score_response(attack, canary, response, start)
+        except Exception as exc:  # noqa: BLE001 - a flaky strategy must not abort the scan
+            response = TargetResponse(
+                text="",
+                error=f"strategy.build raised {type(exc).__name__}: {exc}",
+            )
+            return self._score_response(attack, canary, response, start)
+
+        response = self._deliver(conv, steps, system, attack, canary)
+        return self._score_response(attack, canary, response, start)
+
+    def _deliver(
+        self,
+        conv: "ConversationalTarget",
+        steps: Sequence["AttackStep"],
+        system: Optional[str],
+        attack: Attack,
+        canary: str,
+    ) -> TargetResponse:
+        """Deliver the strategy's turns and return the scored step's response.
+
+        History accumulates turn by turn. For each step we append its message to
+        the running transcript; ``expect_response`` steps are actually sent to the
+        target (so the reply becomes history for later turns), while scripted
+        turns (``expect_response=False``) are only inserted as fake history. The
+        response captured for the single ``scored`` step is what we return.
+        """
+        from .targets.conversational import ChatMessage
+
+        history: list[ChatMessage] = []
+        scored_response: Optional[TargetResponse] = None
+
+        for step in steps:
+            history.append(step.message)
+            if not step.expect_response:
+                # A scripted assistant/history turn: insert verbatim, no call.
+                continue
+            response = self._chat(conv, list(history), system)
+            if step.scored:
+                scored_response = response
+
+        if scored_response is not None:
+            return scored_response
+        # No scored step ever produced a response (degenerate strategy). Treat as
+        # an errored, unscorable round rather than silently passing.
+        return TargetResponse(
+            text="",
+            error="strategy produced no scored, response-expecting turn.",
+        )
+
+    def _chat(
+        self,
+        conv: "ConversationalTarget",
+        messages: list["ChatMessage"],
+        system: Optional[str],
+    ) -> TargetResponse:
+        """Call ``conv.chat`` defensively, converting any fault to an error.
+
+        Mirrors :meth:`_send`'s guards for the conversational contract: a target
+        that raises or returns a non-:class:`TargetResponse` becomes an errored
+        response instead of aborting the scan.
+        """
+        try:
+            response = conv.chat(messages, system=system)
+        except Exception as exc:  # noqa: BLE001 - one bad turn must not kill the scan
+            return TargetResponse(
+                text="",
+                error=f"target.chat raised {type(exc).__name__}: {exc}",
+            )
+        if not isinstance(response, TargetResponse):
+            return TargetResponse(
+                text="",
+                error=(
+                    "target.chat returned a "
+                    f"{type(response).__name__}, not a TargetResponse "
+                    "(adapter violated the ConversationalTarget protocol)."
+                ),
+            )
+        return response
+
+    def _score_response(
+        self,
+        attack: Attack,
+        canary: str,
+        response: TargetResponse,
+        start: float,
+    ) -> AttackResult:
+        """Evaluate detectors over one response and build the scored result."""
+        verdicts = [self._evaluate(d, attack, response, canary) for d in self.detectors]
+        duration = time.perf_counter() - start
+        result = AttackResult(
+            attack=attack,
+            canary=canary,
+            response=response,
+            verdicts=verdicts,
+            duration_s=duration,
+        )
+        return score(result, use_judge=self.use_judge)
+
+    # ------------------------------------------------------------------ #
+    # v0.2.0 — transforms
+    # ------------------------------------------------------------------ #
+
+    def run_transformed(
+        self,
+        attacks: Iterable[Attack],
+        transforms: Sequence["Transform"],
+    ) -> ScanReport:
+        """Scan ``attacks``, sweeping payload transforms and keeping the best.
+
+        For each attack the engine runs every transform variant (an
+        :class:`~injectkit.transforms.base.Identity` baseline is always included)
+        and keeps the *strongest* outcome — the standard "did ANY obfuscation
+        break it?" robustness question. A success beats a non-success; among ties
+        higher confidence wins; an errored response never displaces a real
+        attempt. A transform that raises
+        :class:`~injectkit.transforms.base.TransformError` (or any exception) is
+        treated as a skip for that attack — the untransformed prompt is sent — so
+        a flaky transform never drops an attack from the scan.
+
+        Args:
+            attacks: The corpus to scan.
+            transforms: Transform variants to sweep (Identity auto-added).
+
+        Returns:
+            A :class:`ScanReport` whose per-attack result is the best variant.
+
+        Raises:
+            ScanError: if ``attacks`` is empty.
+        """
+        from .transforms.base import Identity
+
+        attacks = list(attacks)
+        if not attacks:
+            raise ScanError("No attacks to run (empty corpus for run_transformed).")
+
+        variants: list[Transform] = list(transforms)
+        if not any(getattr(t, "name", "") == Identity.name for t in variants):
+            variants.insert(0, Identity())
+
+        started_at = time.time()
+        best_by_id: dict[str, AttackResult] = {}
+        order: list[str] = []
+        for attack in attacks:
+            order.append(attack.id)
+        for transform in variants:
+            wrapped = self._with_transform(transform)
+            sub = Engine(
+                wrapped,
+                self.detectors,
+                use_judge=self.use_judge,
+                canary_factory=self.canary_factory,
+                tool_version=self.tool_version,
+                trigger=self.trigger,
+            )
+            for attack in attacks:
+                result = sub.run_one(attack)
+                aid = attack.id
+                current = best_by_id.get(aid)
+                if current is None or _is_stronger(result, current):
+                    best_by_id[aid] = result
+                if self.on_result is not None:
+                    self.on_result(result)
+        finished_at = time.time()
+
+        results = [best_by_id[aid] for aid in order]
+        findings = [Finding.from_result(r) for r in results if r.success]
+        return ScanReport(
+            target_name=getattr(self.target, "name", "target"),
+            target_model=self._target_model(results),
+            results=results,
+            findings=findings,
+            started_at=started_at,
+            finished_at=finished_at,
+            tool_version=self.tool_version,
+        )
+
+    def _with_transform(self, transform: "Transform") -> Target:
+        """Wrap the engine's target so ``transform`` rewrites every prompt.
+
+        Reuses the benchmark runner's :class:`_TransformingTarget` (lazy-imported)
+        so the canary-recovery + skip-on-error behaviour is identical to the
+        benchmark path. Identity is short-circuited (no wrapper).
+        """
+        from .transforms.base import Identity
+
+        if getattr(transform, "name", "") == Identity.name:
+            return self.target
+        from .benchmark_runner import _TransformingTarget
+
+        return _TransformingTarget(self.target, transform, trigger=self.trigger)
+
+    # ------------------------------------------------------------------ #
+    # v0.2.0 — defenses
+    # ------------------------------------------------------------------ #
+
+    def run_defended(
+        self,
+        attacks: Iterable[Attack],
+        defense: "Defense",
+    ) -> ScanReport:
+        """Scan ``attacks`` with a :class:`~injectkit.defenses.base.Defense` on.
+
+        The defense's three hooks wrap every send in the contract order
+        (``wrap_system`` -> ``filter_input`` -> ``send`` -> ``filter_output``),
+        so the detectors score the *filtered* output. Comparing the resulting
+        ASR/findings against an undefended :meth:`run` measures whether the
+        defense helps. The ``none`` baseline defense is a pure passthrough.
+
+        Args:
+            attacks: The corpus to scan.
+            defense: The defense to apply.
+
+        Returns:
+            A :class:`ScanReport` produced against the defended target.
+        """
+        wrapped = self._with_defense(defense)
+        sub = Engine(
+            wrapped,
+            self.detectors,
+            use_judge=self.use_judge,
+            canary_factory=self.canary_factory,
+            on_result=self.on_result,
+            tool_version=self.tool_version,
+            trigger=self.trigger,
+        )
+        return sub.run(attacks)
+
+    def _with_defense(self, defense: "Defense") -> Target:
+        """Wrap the engine's target with ``defense``'s hooks (NullDefense is no-op)."""
+        from .defenses.base import NullDefense
+
+        if getattr(defense, "name", "") == NullDefense.name:
+            return self.target
+        from .benchmark_runner import _DefendedTarget
+
+        return _DefendedTarget(self.target, defense)
+
+    # ------------------------------------------------------------------ #
+    # v0.2.0 — adaptive attacker
+    # ------------------------------------------------------------------ #
+
+    def run_adaptive(
+        self,
+        seed_attack: Attack,
+        attacker: "AdaptiveAttacker",
+    ) -> "AttackerResult":
+        """Drive an adaptive attacker against the engine's target for one seed.
+
+        Hands the engine's target and detectors to the
+        :class:`~injectkit.attackers.base.AdaptiveAttacker`'s bounded
+        propose/refine loop and returns its
+        :class:`~injectkit.attackers.base.AttackerResult` (best round, success
+        flag, full transcript). The attacker optimises attack *structure* to make
+        the target emit the benign marker — never harmful content — and respects
+        its own ``max_rounds`` budget.
+
+        Args:
+            seed_attack: The benign-canary attack to optimise.
+            attacker: The adaptive attacker to run.
+
+        Returns:
+            The :class:`AttackerResult` of the run.
+
+        Raises:
+            AttackerError: only on unrecoverable attacker setup (e.g. the
+                attacker model's optional dependency is missing). Per-round faults
+                are captured in the transcript, not raised.
+        """
+        return attacker.run(seed_attack, self.target, self.detectors)
+
+    def fold_adaptive(
+        self,
+        seed_attack: Attack,
+        attacker: "AdaptiveAttacker",
+    ) -> AttackResult:
+        """Run the adaptive attacker and return its best round as an AttackResult.
+
+        Convenience over :meth:`run_adaptive` for callers that want a single
+        scored :class:`AttackResult` (the strongest round) to fold into a
+        :class:`ScanReport` alongside ordinary scan results.
+        """
+        outcome = self.run_adaptive(seed_attack, attacker)
+        return outcome.best_result
+
+    # ------------------------------------------------------------------ #
+    # v0.2.0 — benchmark (ASR with/without defenses & transforms)
+    # ------------------------------------------------------------------ #
+
+    def benchmark(
+        self,
+        attacks: Iterable[Attack],
+        *,
+        transforms: Optional[Sequence["Transform"]] = None,
+        defenses: Optional[Sequence["Defense"]] = None,
+        attacker: Optional["AdaptiveAttacker"] = None,
+        group_by: Optional[Callable[[Attack], str]] = None,
+        seed: Optional[int] = None,
+    ) -> "BenchmarkResult":
+        """Produce a reproducible per-technique/per-defense ASR scorecard.
+
+        Thin façade over :class:`~injectkit.benchmark_runner.BenchmarkRunner` that
+        reuses *this* engine's target, detectors, judging flag, canary factory and
+        tool version, then sweeps the supplied transform and defense axes (each
+        with its Identity/``none`` baseline) and optionally folds in an adaptive
+        attacker. The result rolls ASR up per technique, per defense, and overall,
+        stamped with reproducibility metadata (corpus hash, transforms, defenses,
+        seed, attacker model).
+
+        Args:
+            attacks: The corpus to benchmark.
+            transforms: Transform variants to sweep (Identity always included).
+            defenses: Defense variants to sweep ("none" always included).
+            attacker: Optional adaptive attacker folded into the baseline.
+            group_by: Attack -> group function (default: by technique).
+            seed: Reproducibility seed stamped on the metadata.
+
+        Returns:
+            A populated :class:`~injectkit.benchmark.BenchmarkResult`.
+        """
+        from .benchmark_runner import BenchmarkRunner, _technique_group
+
+        runner = BenchmarkRunner(
+            self.target,
+            self.detectors,
+            transforms=transforms,
+            defenses=defenses,
+            attacker=attacker,
+            use_judge=self.use_judge,
+            group_by=group_by or _technique_group,
+            seed=seed,
+            canary_factory=self.canary_factory,
+            tool_version=self.tool_version,
+            trigger=self.trigger,
+        )
+        return runner.run(attacks)
 
     # ------------------------------------------------------------------ #
     # Internals
@@ -269,6 +689,23 @@ class Engine:
             if r.response.model:
                 return r.response.model
         return None
+
+
+def _is_stronger(candidate: AttackResult, current: AttackResult) -> bool:
+    """True if ``candidate`` is a stronger scan outcome than ``current``.
+
+    Used by :meth:`Engine.run_transformed` to keep the best variant per attack.
+    Ordering mirrors the benchmark runner: a non-errored real attempt always
+    beats an errored one; a success beats a non-success; among same-success,
+    same-error results higher confidence wins.
+    """
+    cand_err = candidate.response.error is not None
+    cur_err = current.response.error is not None
+    if cand_err != cur_err:
+        return not cand_err
+    if candidate.success != current.success:
+        return candidate.success
+    return candidate.confidence > current.confidence
 
 
 def run_scan(

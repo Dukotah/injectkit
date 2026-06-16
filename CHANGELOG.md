@@ -7,11 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.2.0] — 2026-06-15
+
+injectkit grows from a single pass/fail scan into a reproducible **robustness
+benchmark** — still offline-first, still benign-canary based, still
+**defensive / authorized-use only**.
+
 ### Added
 
+- **`injectkit bench` command** — sweep the corpus across transforms and defenses
+  and emit a per-technique, per-defense **attack-success-rate (ASR)** scorecard
+  with a reproducibility stamp (tool version, corpus hash, seed). Shares the
+  robustness flags with `scan`. See `docs/BENCHMARK.md`.
 - **`injectkit gui` command** — point-and-shoot launch of the local web UI in
   your browser (`injectkit gui`, with `--host` / `--port` / `--no-open`). The
   existing `python -m injectkit.web` entry point still works.
+- **Offline local-model targets** — point injectkit at a self-hosted or
+  in-process model with no API key: `ollama` (local Ollama server),
+  `openai` (OpenAI-compatible local server: vLLM / LM Studio / etc.), and `hf`
+  (in-process HuggingFace Transformers). The core and new targets stay
+  offline-first with lazy-imported heavy SDKs.
+- **Attack transforms** — canary-preserving, deterministic obfuscation modifiers
+  (`base64`, `rot13`, `hex`, `leetspeak`, `homoglyph`, `zero_width`, `reversed`,
+  `split`, plus the `identity` baseline) layered onto base attacks to stress
+  input filtering, registered through a process-wide `TransformRegistry` and
+  selected with `--mutate`.
+- **Multi-turn attacks & strategies** — `crescendo`, `many_shot`,
+  `context_overflow`, and `persona_priming` conversational strategies
+  (`--multiturn`) scored on the same benign-canary proxy as single-shot attacks.
+- **Adaptive attacker** — a local-model-first attacker (`--adaptive`, default
+  backend a local Ollama server) that optimizes attack *structure* (never
+  harmful content) against the benign proxy, graded by the detectors.
+- **Defenses** — pluggable mitigations selected with `--defense`
+  (`hardened_system`, `sandwich`, `input_sanitizer`, `output_filter`, plus the
+  `none` baseline) measured as ASR-with vs ASR-without via `defense_delta`.
+- **ASR benchmark data model** — `injectkit/benchmark.py` (`ASRCell`,
+  `BenchmarkRunMetadata`, `BenchmarkResult`): pure data, no heavy imports, no
+  network. Rollups by technique and by defense with a reproducibility stamp.
+- **Research-dataset interface** — opt-in, gated references to the official
+  academic datasets (AdvBench, HarmBench, JailbreakBench, In-The-Wild
+  Jailbreaks, Tensor Trust) by name + URL only; never bundled. Gated behind
+  `--research-benchmark DATASET` **plus** `--i-am-authorized`; downloads from
+  each dataset's own source and prints the research-use disclaimer.
+- **Packaging extras** — new lazy-imported extras `injectkit[ollama]`,
+  `injectkit[openai]`, `injectkit[hf]`, and `injectkit[research]` alongside the
+  existing `anthropic` / `mcp` / `all`.
+- **Docs** — new `docs/BENCHMARK.md` (ASR methodology + reproduction); expanded
+  `docs/TAXONOMY.md` and `docs/RESEARCH-USE.md`; README and landing page updated
+  for the v0.2.0 capabilities and a prominent research-use / ethics section.
 
 ### Fixed
 
@@ -69,5 +114,6 @@ authorized to test for prompt injection, then reports which attacks got through.
 - **CI** — test workflow plus a self-scan workflow that runs injectkit against
   its own bundled demo target.
 
-[Unreleased]: https://github.com/Dukotah/injectkit/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Dukotah/injectkit/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Dukotah/injectkit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Dukotah/injectkit/releases/tag/v0.1.0

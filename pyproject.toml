@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "injectkit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Open-source red-team scanner for LLM prompt injection. Defensive, authorized-use only."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,8 +44,22 @@ dependencies = [
 anthropic = ["anthropic>=0.69"]
 # MCP server / agent tool-use adapter.
 mcp = ["mcp>=1.0"]
+# HuggingFace Transformers in-process model target (loads + generates locally).
+hf = ["transformers>=4.40", "torch>=2.0"]
+# Local Ollama server target + the local adaptive attacker backend (no API key).
+ollama = ["requests>=2.28"]
+# OpenAI-compatible local server target (vLLM / LM Studio / etc.; no API key).
+openai = ["requests>=2.28"]
+# Gated, opt-in research-dataset loaders (download official datasets on demand).
+research = ["requests>=2.28"]
 # Everything optional, for a full install.
-all = ["anthropic>=0.69", "mcp>=1.0"]
+all = [
+    "anthropic>=0.69",
+    "mcp>=1.0",
+    "transformers>=4.40",
+    "torch>=2.0",
+    "requests>=2.28",
+]
 # Test/dev tooling.
 dev = ["pytest>=8.0"]
 

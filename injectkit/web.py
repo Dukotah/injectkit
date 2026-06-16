@@ -2,17 +2,29 @@
 
 A tiny, dependency-free browser front end for injectkit so you can interact with
 a scan without the command line. It reuses the exact same engine, corpus, target
-adapters, detectors, and HTML reporter the CLI uses — this is a thin web layer,
-not a second implementation.
+adapters, detectors, reporters, transforms, defenses, and benchmark runner the
+CLI uses — this is a thin web layer, not a second implementation.
 
 Run it with::
 
     python -m injectkit.web            # opens http://127.0.0.1:8765 in your browser
     python -m injectkit.web --port 9000 --no-open
 
-Then pick a target (the offline ``mock`` target needs no API key and no network),
-choose which attack techniques to run, set the CI fail-on threshold, and click
-*Run scan*. The full HTML report renders right in the page.
+Then pick a target (the offline ``mock`` target needs no API key and no network,
+and the new ``ollama`` / ``openai`` / ``hf`` targets drive a model on your own
+machine), choose which attack techniques to run, optionally turn on obfuscation
+transforms (``--mutate``), a mitigation ``defense``, multi-turn delivery, or the
+adaptive attacker, set the CI fail-on threshold, and click *Run scan*. The full
+HTML report renders right in the page.
+
+Switch the *Mode* to **Benchmark** to sweep the corpus across the selected
+transforms and defenses and render the ASR robustness scorecard instead of a
+single scan report.
+
+The optional **research benchmark** stays GATED behind an explicit acknowledgment
+checkbox plus the research-use disclaimer, exactly like the CLI's
+``--research-benchmark`` / ``--i-am-authorized`` pairing — it never downloads
+anything unless you tick the box.
 
 DEFENSIVE / AUTHORIZED USE ONLY. Only scan endpoints you own or are explicitly
 authorized to test. The server binds to localhost only.
@@ -29,6 +41,7 @@ from typing import Optional
 from urllib.parse import parse_qs
 
 from . import __version__
+from .benchmark import BenchmarkResult
 from .config import load_config
 from .engine import Engine
 from .models import ScanReport
@@ -44,8 +57,84 @@ TECHNIQUES = [
     "tool_abuse",
     "data_exfiltration",
 ]
-TARGET_KINDS = ["mock", "http", "anthropic", "mcp"]
+
+# v0.2.0 adds three local (no-API-key) model adapters alongside the originals.
+# Keep this in sync with cli._TARGET_KINDS (mock first so it is the default).
+TARGET_KINDS = ["mock", "ollama", "openai", "hf", "http", "anthropic", "mcp"]
+
 FAIL_ON = ["info", "low", "medium", "high", "critical"]
+
+# The two run modes the GUI offers.
+MODES = ["scan", "benchmark"]
+
+# Friendly one-liners shown under the target dropdown so a first-time user knows
+# which kinds need a key/network and which run fully offline.
+_TARGET_HELP = {
+    "mock": "built-in vulnerable demo target (no key, no network)",
+    "ollama": "a model on your local <b>ollama serve</b> (no API key)",
+    "openai": "an OpenAI-compatible local server (vLLM / LM Studio; no key)",
+    "hf": "an in-process HuggingFace transformers model (loads locally)",
+    "http": "your own endpoint URL",
+    "anthropic": "a Claude model (needs ANTHROPIC_API_KEY)",
+    "mcp": "a Model Context Protocol server you run",
+}
+
+
+def _list_transforms() -> list[str]:
+    """Transform names available for the mutate selector (without the no-op)."""
+    try:
+        from .transforms.base import list_transforms
+
+        return [t for t in list_transforms() if t != "identity"]
+    except Exception:  # noqa: BLE001 - the GUI must still render if a registry is empty
+        return []
+
+
+def _list_defenses() -> list[str]:
+    """Defense names available for the defense selector ("none" first)."""
+    try:
+        from .defenses.base import list_defenses
+
+        names = list(list_defenses())
+    except Exception:  # noqa: BLE001
+        names = ["none"]
+    names = sorted(n for n in names if n != "none")
+    return ["none", *names]
+
+
+def _list_multiturn_strategies() -> list[str]:
+    """Multi-turn strategy names for the multiturn selector."""
+    try:
+        from .attacks.multiturn import MULTI_TURN_STRATEGIES
+
+        return list(MULTI_TURN_STRATEGIES.keys())
+    except Exception:  # noqa: BLE001
+        return ["crescendo", "many_shot", "context_overflow", "persona_priming"]
+
+
+def _list_research_datasets() -> list[tuple[str, str]]:
+    """(key, human description) pairs for the gated research-benchmark selector."""
+    try:
+        from .research.registry import KNOWN_DATASETS
+
+        return [(k, ref.name) for k, ref in KNOWN_DATASETS.items()]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _research_disclaimer() -> str:
+    """The canonical research-use disclaimer shown beside the opt-in checkbox."""
+    try:
+        from .research.base import RESEARCH_DISCLAIMER
+
+        return RESEARCH_DISCLAIMER
+    except Exception:  # noqa: BLE001
+        return (
+            "Research datasets reference potentially harmful prompts and are "
+            "downloaded from their own official sources for authorized, ethical "
+            "research only."
+        )
+
 
 # Last rendered HTML report, served at /report and embedded in the results page.
 _LAST_REPORT_HTML: Optional[str] = None
@@ -53,26 +142,43 @@ _LOCK = threading.Lock()
 
 
 # --------------------------------------------------------------------------- #
-# Scan execution (reuses the CLI pipeline)
+# Form parsing helpers
 # --------------------------------------------------------------------------- #
-def run_scan(form: dict[str, list[str]]) -> ScanReport:
-    """Build a Config from form fields and run a scan, returning the report."""
-    def one(name: str) -> Optional[str]:
-        vals = form.get(name)
-        val = vals[0].strip() if vals and vals[0].strip() else None
-        return val
+def _one(form: dict[str, list[str]], name: str) -> Optional[str]:
+    """First non-blank value of ``name`` in a parsed query form, else None."""
+    vals = form.get(name)
+    if not vals:
+        return None
+    val = vals[0].strip()
+    return val or None
 
-    target: dict = {"kind": one("kind") or "mock"}
+
+def _checked(form: dict[str, list[str]], name: str) -> bool:
+    """True when a checkbox/flag field is present with a truthy value."""
+    vals = form.get(name)
+    if not vals:
+        return False
+    return vals[0].strip().lower() not in ("", "0", "false", "off", "no")
+
+
+def _build_config_from_form(form: dict[str, list[str]]):
+    """Assemble a Config + filtered attack list from the submitted form.
+
+    Shared by both the scan and the benchmark path so the target/technique
+    selection is identical. Returns ``(config, attacks, target_obj, detectors)``.
+    Raises ``ValueError`` if the technique filter excludes everything.
+    """
+    target: dict = {"kind": _one(form, "kind") or "mock"}
     for f in ("url", "model", "system"):
-        if one(f):
-            target[f] = one(f)
+        if _one(form, f):
+            target[f] = _one(form, f)
 
     techniques = [t for t in form.get("technique", []) if t in TECHNIQUES]
 
     overrides: dict = {
         "target": target,
-        "use_judge": bool(form.get("judge")),
-        "fail_on": one("fail_on") or "high",
+        "use_judge": _checked(form, "judge"),
+        "fail_on": _one(form, "fail_on") or "high",
         "report_format": "html",
     }
     if techniques:
@@ -85,6 +191,113 @@ def run_scan(form: dict[str, list[str]]) -> ScanReport:
 
     target_obj = _build_target(config)
     detectors = _build_detectors(config)
+    return config, attacks, target_obj, detectors
+
+
+def _selected_transforms(form: dict[str, list[str]]) -> list:
+    """Instantiate the transforms the user ticked under *mutate* (ordered)."""
+    names = [n for n in form.get("mutate", []) if n and n.strip()]
+    if not names:
+        return []
+    from .transforms.base import get_transform
+
+    out = []
+    for n in names:
+        try:
+            out.append(get_transform(n))
+        except Exception:  # noqa: BLE001 - skip an unknown/removed transform name
+            continue
+    return out
+
+
+def _selected_defense(form: dict[str, list[str]]):
+    """Instantiate the chosen defense, or None for the 'none' baseline."""
+    name = _one(form, "defense") or "none"
+    if name == "none":
+        return None
+    try:
+        from .defenses.base import get_defense
+
+        return get_defense(name)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _selected_multiturn(form: dict[str, list[str]]):
+    """Resolve the multi-turn strategy the user requested, or None.
+
+    Only returns a strategy when the *multiturn* checkbox is ticked AND a known
+    strategy name is selected. An unknown/removed strategy name degrades to None
+    (single-shot) rather than raising, so the GUI never crashes on stale form
+    state. The strategy still drives the benign-canary proxy end to end.
+    """
+    if not _checked(form, "multiturn"):
+        return None
+    name = _one(form, "multiturn_strategy")
+    if not name:
+        return None
+    try:
+        from .cli_robustness import build_strategy_for
+
+        return build_strategy_for(name)
+    except Exception:  # noqa: BLE001 - a bad strategy name falls back to single-shot
+        return None
+
+
+def _wrap_target_for_scan(target_obj, transforms: list, defense, strategy=None):
+    """Wrap a target with the selected transforms + defense + multi-turn delivery.
+
+    Reuses the exact wrapper classes the CLI/benchmark runner use so the GUI's
+    transform/defense/multi-turn behaviour is identical to ``injectkit scan``:
+    the multi-turn strategy wraps the innermost target (it delivers the
+    engine-rendered, canary-bearing prompt as a conversation), then transforms
+    are composed left-to-right over each outgoing turn, then the defense's hooks
+    wrap each send. The benign canary is preserved throughout. Returns the
+    (possibly unchanged) target plus the list of human-readable transform names
+    applied.
+    """
+    applied_names: list[str] = []
+    wrapped = target_obj
+    if strategy is not None:
+        from .cli_robustness import wrap_target_for_multiturn
+
+        wrapped = wrap_target_for_multiturn(wrapped, strategy)
+    if transforms:
+        from .benchmark_runner import _TransformingTarget
+        from .transforms.base import Compose
+
+        combo = transforms[0] if len(transforms) == 1 else Compose(*transforms)
+        wrapped = _TransformingTarget(wrapped, combo)
+        applied_names = [getattr(t, "name", "?") for t in transforms]
+    if defense is not None:
+        from .benchmark_runner import _DefendedTarget
+
+        wrapped = _DefendedTarget(wrapped, defense)
+    return wrapped, applied_names
+
+
+# --------------------------------------------------------------------------- #
+# Scan execution (reuses the CLI pipeline)
+# --------------------------------------------------------------------------- #
+def run_scan(form: dict[str, list[str]]) -> ScanReport:
+    """Build a Config from form fields and run a scan, returning the report.
+
+    Honours the v0.2.0 robustness toggles: any ticked *mutate* transforms, a
+    selected *defense*, and the *multi-turn* delivery strategy wrap the target
+    before the engine scores it (the same wrappers the CLI/benchmark runner use),
+    preserving the benign-canary proxy. The adaptive attacker is intentionally
+    not engaged here because the GUI exposes no attacker-model fields; it stays a
+    CLI-only flow so the GUI never blocks on a missing local model.
+    """
+    config, attacks, target_obj, detectors = _build_config_from_form(form)
+
+    transforms = _selected_transforms(form)
+    defense = _selected_defense(form)
+    strategy = _selected_multiturn(form)
+    target_obj, _applied = _wrap_target_for_scan(
+        target_obj, transforms, defense, strategy
+    )
+
     engine = Engine(
         target_obj,
         detectors,
@@ -92,6 +305,96 @@ def run_scan(form: dict[str, list[str]]) -> ScanReport:
         tool_version=__version__,
     )
     return engine.run(attacks)
+
+
+# --------------------------------------------------------------------------- #
+# Benchmark execution (reuses the benchmark runner + scorecard reporter)
+# --------------------------------------------------------------------------- #
+def run_benchmark(form: dict[str, list[str]]) -> BenchmarkResult:
+    """Build a Config from form fields and run the ASR benchmark sweep.
+
+    Sweeps the corpus across the selected transforms (Identity is always the
+    baseline) and the selected defense plus the undefended baseline, returning a
+    :class:`~injectkit.benchmark.BenchmarkResult`. Offline-first: with the mock
+    target this runs with no network and no API key. Multi-turn / adaptive toggles
+    are recorded for context; the adaptive attacker is only engaged when a local
+    attacker model is actually available (otherwise the sweep runs without it so
+    the GUI never blocks on a missing optional dependency).
+    """
+    config, attacks, target_obj, detectors = _build_config_from_form(form)
+
+    transforms = _selected_transforms(form)
+    defense = _selected_defense(form)
+    defenses = [defense] if defense is not None else None
+
+    from .benchmark_runner import run_benchmark as _run_benchmark
+
+    return _run_benchmark(
+        target_obj,
+        attacks,
+        detectors,
+        transforms=transforms or None,
+        defenses=defenses,
+        use_judge=config.use_judge,
+        tool_version=__version__,
+    )
+
+
+def run_research_benchmark(form: dict[str, list[str]]) -> BenchmarkResult:
+    """Run a GATED research-dataset benchmark — only after explicit acknowledgment.
+
+    Mirrors the CLI's ``--research-benchmark`` + ``--i-am-authorized`` contract:
+    refuses unless the *acknowledge* checkbox is ticked, prints/echoes the
+    research-use disclaimer, lazy-loads the dataset loader (which downloads from
+    the dataset's own official source — never bundled), and benchmarks the loaded
+    behaviours against the configured target. Tests stub the loader so nothing is
+    downloaded offline.
+    """
+    if not _checked(form, "research_ack"):
+        from .research.base import ResearchAcknowledgmentError
+
+        raise ResearchAcknowledgmentError(
+            "Research benchmark refused: you must tick the acknowledgment box to "
+            "confirm authorized, ethical, research-only use before any dataset is "
+            "downloaded.\n\n" + _research_disclaimer()
+        )
+
+    dataset = _one(form, "research_dataset")
+    if not dataset:
+        raise ValueError("Pick a research dataset to benchmark against.")
+
+    try:
+        limit = int(_one(form, "research_limit") or "25")
+    except (TypeError, ValueError):
+        limit = 25
+
+    config, _attacks, target_obj, detectors = _build_config_from_form(form)
+
+    # Lazy import keeps the gated research surface out of the offline core path.
+    from .research import get_loader
+
+    loader = get_loader(dataset)
+    attacks = loader.load(acknowledge=True, limit=limit)
+    if not attacks:
+        raise ValueError(
+            f"The {dataset} loader returned no behaviours (nothing to benchmark)."
+        )
+
+    transforms = _selected_transforms(form)
+    defense = _selected_defense(form)
+    defenses = [defense] if defense is not None else None
+
+    from .benchmark_runner import run_benchmark as _run_benchmark
+
+    return _run_benchmark(
+        target_obj,
+        attacks,
+        detectors,
+        transforms=transforms or None,
+        defenses=defenses,
+        use_judge=config.use_judge,
+        tool_version=__version__,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -110,8 +413,9 @@ h1 .v { color: #768390; font-size: 14px; font-weight: 400; }
 .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px;
         padding: 20px; margin: 0 0 20px; }
 label { display: block; font-weight: 600; margin: 14px 0 4px; font-size: 13px; }
-input[type=text], select { width: 100%; padding: 8px 10px; border-radius: 6px;
-        border: 1px solid #30363d; background: #0e1116; color: #e6edf3; font-size: 14px; }
+input[type=text], input[type=number], select { width: 100%; padding: 8px 10px;
+        border-radius: 6px; border: 1px solid #30363d; background: #0e1116;
+        color: #e6edf3; font-size: 14px; }
 .row { display: flex; gap: 16px; } .row > div { flex: 1; }
 .techs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
 .techs label { font-weight: 400; display: flex; align-items: center; gap: 8px; margin: 0; }
@@ -120,6 +424,7 @@ button { background: #238636; color: #fff; border: 0; padding: 11px 22px;
          border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 22px; }
 button:hover { background: #2ea043; }
 a { color: #58a6ff; } .chk { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.chk label { margin: 0; font-weight: 400; }
 .summary { display: flex; gap: 14px; flex-wrap: wrap; margin: 0 0 18px; }
 .stat { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
         padding: 12px 18px; min-width: 110px; }
@@ -127,10 +432,14 @@ a { color: #58a6ff; } .chk { display: flex; align-items: center; gap: 8px; margi
 .bad { color: #f85149; } .good { color: #3fb950; } .warn { color: #e3b341; }
 .warnbox { background: #2d2410; border: 1px solid #5c4813; color: #e3b341;
            padding: 12px 16px; border-radius: 8px; font-size: 14px; margin: 0 0 18px; }
+.gatebox { background: #20131b; border: 1px solid #5c1a3a; color: #ff9ecb;
+           padding: 12px 16px; border-radius: 8px; font-size: 13px; margin: 14px 0 0; }
 iframe { width: 100%; height: 1400px; border: 1px solid #30363d; border-radius: 10px; background: #fff; }
 .err { background: #2d1416; border: 1px solid #5c1a1f; color: #ff7b72;
        padding: 14px 16px; border-radius: 8px; }
 code { background: #0e1116; padding: 1px 5px; border-radius: 4px; }
+fieldset { border: 1px solid #30363d; border-radius: 8px; margin: 16px 0 0; padding: 10px 14px 14px; }
+legend { font-weight: 600; font-size: 13px; padding: 0 6px; color: #adbac7; }
 """
 
 _BANNER = (
@@ -148,50 +457,152 @@ def _page(body: str) -> bytes:
     ).encode("utf-8")
 
 
+def _options(values, selected: str) -> str:
+    """Build <option> markup, marking ``selected`` as the chosen value."""
+    return "".join(
+        f"<option value='{html.escape(str(v), quote=True)}'"
+        f"{' selected' if v == selected else ''}>{html.escape(str(v))}</option>"
+        for v in values
+    )
+
+
 def form_page(notice: str = "") -> bytes:
     techs = "".join(
         f"<label><input type=checkbox name=technique value='{t}'> {t}</label>"
         for t in TECHNIQUES
     )
-    kinds = "".join(
-        f"<option value='{k}'{' selected' if k == 'mock' else ''}>{k}</option>"
-        for k in TARGET_KINDS
+    kinds = _options(TARGET_KINDS, "mock")
+    fail = _options(FAIL_ON, "high")
+    modes = _options(MODES, "scan")
+
+    # Mutate transform checkboxes (a grid of the registry's transforms).
+    transform_names = _list_transforms()
+    if transform_names:
+        mutate = "".join(
+            f"<label><input type=checkbox name=mutate value='{html.escape(t, quote=True)}'> "
+            f"{html.escape(t)}</label>"
+            for t in transform_names
+        )
+        mutate_block = (
+            "<label>Mutate <span class=hint>(obfuscation transforms — ticking any "
+            "measures robustness against input filtering; identity is always the "
+            "baseline)</span></label>"
+            f"<div class=techs>{mutate}</div>"
+        )
+    else:
+        mutate_block = ""
+
+    defenses = _list_defenses()
+    defense_select = (
+        "<div><label>Defense</label>"
+        f"<select name=defense>{_options(defenses, 'none')}</select>"
+        "<p class=hint>Wrap the target in a mitigation before scoring "
+        "(measures ASR with the defense). Default: none.</p></div>"
     )
-    fail = "".join(
-        f"<option value='{s}'{' selected' if s == 'high' else ''}>{s}</option>"
-        for s in FAIL_ON
+
+    mt_strategies = _list_multiturn_strategies()
+    multiturn_select = "".join(
+        f"<option value='{html.escape(s, quote=True)}'>{html.escape(s)}</option>"
+        for s in mt_strategies
     )
+
+    # Per-target config hints rendered as a small legend so the user knows what
+    # the URL/model fields mean for each kind.
+    target_help = " &middot; ".join(
+        f"<b>{html.escape(k)}</b> = {v}" for k, v in _TARGET_HELP.items()
+    )
+
+    # The gated research-benchmark block (collapsed-looking fieldset). It only
+    # does anything when the acknowledgment box is ticked AND mode=benchmark.
+    datasets = _list_research_datasets()
+    if datasets:
+        ds_opts = "".join(
+            f"<option value='{html.escape(k, quote=True)}'>"
+            f"{html.escape(k)} — {html.escape(name)}</option>"
+            for k, name in datasets
+        )
+        research_block = (
+            "<fieldset><legend>Research benchmark (gated, opt-in)</legend>"
+            "<p class=hint>Benchmark against an official public research dataset. "
+            "The dataset is downloaded from its OWN source (never bundled) and "
+            "only when you explicitly acknowledge the terms below. Benchmark mode "
+            "only.</p>"
+            "<label>Dataset</label>"
+            f"<select name=research_dataset>{ds_opts}</select>"
+            "<div class=row><div><label>Limit "
+            "<span class=hint>(max behaviours)</span></label>"
+            "<input type=number name=research_limit value=25 min=1></div></div>"
+            "<div class=chk><input type=checkbox name=research_ack value=1 "
+            "id=ack><label for=ack>I acknowledge the research-use terms "
+            "(required to load any dataset).</label></div>"
+            f"<div class=gatebox>{html.escape(_research_disclaimer())}</div>"
+            "</fieldset>"
+        )
+    else:
+        research_block = ""
+
     return _page(
         f"<h1>injectkit <span class=v>v{__version__}</span></h1>"
-        "<p class=sub>Red-team your own LLM app for prompt injection.</p>"
+        "<p class=sub>Red-team your own LLM app for prompt injection — "
+        "now with transforms, defenses, multi-turn, adaptive, and an ASR "
+        "scorecard.</p>"
         f"<div class=banner>{_BANNER}</div>"
         f"{notice}"
         "<form method=post action='/scan'><div class=card>"
         "<div class=row>"
-        f"<div><label>Target</label><select name=kind>{kinds}</select>"
-        "<p class=hint><b>mock</b> = built-in vulnerable demo target (no key, no "
-        "network). <b>http</b> = your endpoint URL. <b>anthropic</b> = a Claude "
-        "model (needs ANTHROPIC_API_KEY).</p></div>"
+        f"<div><label>Mode</label><select name=mode>{modes}</select>"
+        "<p class=hint><b>scan</b> = one report. <b>benchmark</b> = ASR "
+        "robustness scorecard (sweeps transforms &times; defenses).</p></div>"
+        f"<div><label>Target</label><select name=kind>{kinds}</select></div>"
         f"<div><label>Fail-on (CI gate)</label><select name=fail_on>{fail}</select>"
-        "<p class=hint>Lowest severity that counts as a failed gate.</p></div>"
+        "<p class=hint>Lowest severity that counts as a failed gate (scan mode)."
+        "</p></div>"
         "</div>"
-        "<label>Endpoint URL <span class=hint>(http target only)</span></label>"
-        "<input type=text name=url placeholder='https://your-app.example.com/api/chat'>"
+        f"<p class=hint>{target_help}</p>"
+        "<label>Endpoint / server URL "
+        "<span class=hint>(http, or the ollama/openai server base URL)</span></label>"
+        "<input type=text name=url placeholder='http://localhost:11434  or  "
+        "https://your-app.example.com/api/chat'>"
         "<div class=row>"
         "<div><label>Model <span class=hint>(optional)</span></label>"
-        "<input type=text name=model placeholder='claude-opus-4-8'></div>"
+        "<input type=text name=model placeholder='llama3.1 / local-model / "
+        "claude-opus-4-8'></div>"
         "<div><label>System prompt <span class=hint>(optional)</span></label>"
         "<input type=text name=system placeholder=\"You are a helpful assistant.\"></div>"
         "</div>"
         "<label>Techniques <span class=hint>(none = run all 6)</span></label>"
         f"<div class=techs>{techs}</div>"
+        # ---- robustness fieldset (mutate / defense / multiturn / adaptive) ----
+        "<fieldset><legend>Robustness (v0.2.0)</legend>"
+        f"{mutate_block}"
+        "<div class=row style='margin-top:10px'>"
+        f"{defense_select}"
+        "<div><label>Multi-turn <span class=hint>(deliver as a conversation)"
+        "</span></label>"
+        "<div class=chk><input type=checkbox name=multiturn value=1 id=mt>"
+        "<label for=mt>Enable</label>"
+        f"<select name=multiturn_strategy style='max-width:200px'>{multiturn_select}"
+        "</select></div></div>"
+        "</div>"
+        "<div class=chk><input type=checkbox name=adaptive value=1 id=adapt "
+        "disabled>"
+        "<label for=adapt>Adaptive attacker (local-model-first, structure-only, "
+        "benign-canary objective) &mdash; <b>CLI-only</b>: run "
+        "<code>injectkit scan --adaptive</code> with a local attacker model. The "
+        "GUI exposes no attacker-model fields, so this stays disabled here.</label>"
+        "</div>"
+        "</fieldset>"
+        # ---- judge ----
         "<div class=chk><input type=checkbox name=judge value=1 id=judge>"
-        "<label for=judge style='margin:0;font-weight:400'>Use LLM judge "
-        "(sharper grading — needs an Anthropic API key; off = fully offline)</label></div>"
-        "<button type=submit>Run scan</button>"
+        "<label for=judge>Use LLM judge (sharper grading — needs an Anthropic API "
+        "key; off = fully offline)</label></div>"
+        # ---- gated research ----
+        f"{research_block}"
+        "<button type=submit>Run</button>"
         "</div></form>"
-        "<p class=hint>Tip: leave everything default and click <b>Run scan</b> to "
-        "watch injectkit attack the built-in mock target with zero setup.</p>"
+        "<p class=hint>Tip: leave everything default and click <b>Run</b> to watch "
+        "injectkit attack the built-in mock target with zero setup. Switch "
+        "<b>Mode</b> to <b>benchmark</b> for the ASR scorecard.</p>"
     )
 
 
@@ -240,20 +651,111 @@ def results_page(report: ScanReport) -> bytes:
         f"{errored_stat}"
         f"<div class=stat><div class='n {fcls}'>{html.escape(worst_s)}</div><div class=l>worst severity</div></div>"
         "</div>"
-        "<p><a href='/'>&larr; New scan</a> &nbsp;&middot;&nbsp; "
+        "<p><a href='/'>&larr; New run</a> &nbsp;&middot;&nbsp; "
         "<a href='/report' target=_blank>open full report in a new tab</a></p>"
         "<iframe src='/report' title='injectkit report'></iframe>"
     )
 
 
+def benchmark_results_page(result: BenchmarkResult, *, research: bool = False) -> bytes:
+    """Render the ASR scorecard summary page (the full scorecard is in /report)."""
+    from .reporters.scorecard import robustness_grade
+
+    overall = result.overall("none")
+    overall_asr = result.overall_asr("none")
+    grade = robustness_grade(overall_asr) if overall and overall.attempts else "N/A"
+    gcls = "good" if grade in ("A+", "A", "B") else ("warn" if grade in ("C", "D") else "bad")
+
+    succeeded = overall.successes if overall else 0
+    attempts = overall.attempts if overall else 0
+    errored = overall.errored if overall else 0
+    m = result.metadata
+
+    title = "Research benchmark results" if research else "Benchmark results"
+    research_note = (
+        "<div class=gatebox>This scorecard used an opt-in research dataset, "
+        "downloaded from its official source under the research-use terms you "
+        "acknowledged. ASR remains the benign-canary proxy.</div>"
+        if research
+        else ""
+    )
+
+    return _page(
+        f"<h1>{title}</h1>"
+        f"<p class=sub>Target: <code>{html.escape(m.target_name)}</code>"
+        + (f" &middot; <code>{html.escape(m.target_model)}</code>" if m.target_model else "")
+        + "</p>"
+        f"{research_note}"
+        "<div class=summary>"
+        f"<div class=stat><div class='n {gcls}'>{html.escape(grade)}</div>"
+        "<div class=l>robustness grade</div></div>"
+        f"<div class=stat><div class='n {gcls}'>{overall_asr * 100:.1f}%</div>"
+        "<div class=l>overall ASR</div></div>"
+        f"<div class=stat><div class=n>{succeeded}/{attempts}</div>"
+        "<div class=l>succeeded</div></div>"
+        + (
+            f"<div class=stat><div class='n warn'>{errored}</div>"
+            "<div class=l>errored</div></div>"
+            if errored
+            else ""
+        )
+        + "</div>"
+        "<p class=hint>transforms: <code>"
+        f"{html.escape(', '.join(m.transforms) or 'identity')}</code> &middot; "
+        f"defenses: <code>{html.escape(', '.join(m.defenses) or 'none')}</code>"
+        + (f" &middot; corpus <code>{html.escape(m.corpus_hash[:12])}</code>" if m.corpus_hash else "")
+        + "</p>"
+        "<p><a href='/'>&larr; New run</a> &nbsp;&middot;&nbsp; "
+        "<a href='/report' target=_blank>open the full scorecard in a new tab</a></p>"
+        "<iframe src='/report' title='injectkit scorecard'></iframe>"
+    )
+
+
 def error_page(message: str) -> bytes:
     return _page(
-        "<h1>Scan failed</h1>"
+        "<h1>Run failed</h1>"
         f"<div class=err>{html.escape(message)}</div>"
         "<p style='margin-top:18px'><a href='/'>&larr; Back</a></p>"
-        "<p class=hint>The <b>mock</b> target always works offline. <b>anthropic</b> "
-        "needs <code>ANTHROPIC_API_KEY</code>; <b>http</b> needs a reachable URL.</p>"
+        "<p class=hint>The <b>mock</b> target always works offline. <b>ollama</b>/"
+        "<b>openai</b> need a local server running; <b>hf</b> loads a local model "
+        "(needs transformers/torch); <b>anthropic</b> needs "
+        "<code>ANTHROPIC_API_KEY</code>; <b>http</b> needs a reachable URL.</p>"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Dispatch: scan vs benchmark vs gated research benchmark
+# --------------------------------------------------------------------------- #
+def handle_submit(form: dict[str, list[str]]) -> tuple[bytes, Optional[str]]:
+    """Run the requested mode and return ``(page_bytes, report_html)``.
+
+    ``report_html`` is the standalone HTML to serve at ``/report`` (a scan report
+    or an ASR scorecard), or ``None`` when the page already carries everything
+    (an error page). All exceptions are surfaced as a friendly error page rather
+    than propagated, so a misconfigured target never crashes the server.
+    """
+    mode = (_one(form, "mode") or "scan").lower()
+    research = _checked(form, "research_ack") and _one(form, "research_dataset")
+
+    try:
+        if mode == "benchmark" and research:
+            result = run_research_benchmark(form)
+            from .reporters.scorecard import ScorecardHtmlReporter
+
+            return benchmark_results_page(result, research=True), (
+                ScorecardHtmlReporter().render(result)
+            )
+        if mode == "benchmark":
+            result = run_benchmark(form)
+            from .reporters.scorecard import ScorecardHtmlReporter
+
+            return benchmark_results_page(result), ScorecardHtmlReporter().render(result)
+        # Default: a single scan.
+        report = run_scan(form)
+        reporter = _build_reporter("html")
+        return results_page(report), reporter.render(report)
+    except Exception as exc:  # noqa: BLE001 - surface any failure as a friendly page
+        return error_page(f"{type(exc).__name__}: {exc}"), None
 
 
 # --------------------------------------------------------------------------- #
@@ -276,7 +778,7 @@ class _Handler(BaseHTTPRequestHandler):
             with _LOCK:
                 report = _LAST_REPORT_HTML
             if report is None:
-                self._send(form_page("<div class=banner>No scan has run yet.</div>"))
+                self._send(form_page("<div class=banner>No run has happened yet.</div>"))
             else:
                 self._send(report.encode("utf-8"))
         else:
@@ -290,15 +792,11 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length).decode("utf-8") if length else ""
         form = parse_qs(raw, keep_blank_values=True)
-        try:
-            report = run_scan(form)
-        except Exception as exc:  # surface any failure as a friendly page
-            self._send(error_page(f"{type(exc).__name__}: {exc}"))
-            return
-        reporter = _build_reporter("html")
-        with _LOCK:
-            _LAST_REPORT_HTML = reporter.render(report)
-        self._send(results_page(report))
+        page, report_html = handle_submit(form)
+        if report_html is not None:
+            with _LOCK:
+                _LAST_REPORT_HTML = report_html
+        self._send(page)
 
     def log_message(self, *args) -> None:  # keep the console quiet
         return

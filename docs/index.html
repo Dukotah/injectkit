@@ -199,6 +199,7 @@
       <span class="brand"><span class="logo">✓</span> injectkit</span>
       <nav class="nav-links">
         <a href="#install">Install</a>
+        <a href="#whatsnew">v0.2.0</a>
         <a href="#gui">GUI</a>
         <a href="#usage">Usage</a>
         <a href="#how">How it works</a>
@@ -234,7 +235,7 @@
         <div class="term-body">
 <pre><span class="c-prompt">$</span> <span class="c-cmd">injectkit scan --target anthropic --fail-on high</span>
 
-<span class="c-dim">injectkit 0.1.0  ·  defensive / authorized-use only</span>
+<span class="c-dim">injectkit 0.2.0  ·  defensive / authorized-use only</span>
 <span class="c-label">target</span>  anthropic:claude-opus-4-8
 <span class="c-label">corpus</span>  6 techniques · 36 attacks
 
@@ -294,6 +295,58 @@
     </div>
   </section>
 
+  <!-- ===================== WHAT'S NEW v0.2.0 ===================== -->
+  <section id="whatsnew">
+    <div class="wrap">
+      <h2>New in v0.2.0 — a robustness benchmark</h2>
+      <p class="sub">
+        injectkit grew from a single pass/fail scan into a reproducible
+        attack-success-rate (ASR) benchmark — still offline-first, still built on
+        the benign canary proxy, never harmful content.
+      </p>
+      <div class="grid cols-3">
+        <div class="card">
+          <div class="num">OFFLINE</div>
+          <h3>Local-model targets</h3>
+          <p>Point injectkit at a self-hosted or in-process model with <b>no API key</b>. Heavy SDKs stay lazy-imported; the core runs fully offline.</p>
+        </div>
+        <div class="card">
+          <div class="num">TRANSFORMS</div>
+          <h3>Obfuscation modifiers</h3>
+          <p>Canary-preserving, deterministic encode / unicode / framing / splitting transforms layered onto base attacks to stress your input filtering.</p>
+        </div>
+        <div class="card">
+          <div class="num">MULTI-TURN</div>
+          <h3>Crescendo &amp; role-play</h3>
+          <p>Attacks that escalate across turns, scored on the same benign-canary proxy as single-shot attacks.</p>
+        </div>
+        <div class="card">
+          <div class="num">ADAPTIVE</div>
+          <h3>Local-model attacker</h3>
+          <p>A local-model-first attacker that optimizes attack <em>structure</em> against the benign proxy — standard ASR methodology, <b>not</b> a harmful-output generator.</p>
+        </div>
+        <div class="card">
+          <div class="num">DEFENSES</div>
+          <h3>A/B your mitigations</h3>
+          <p>Spotlighting, hardened system prompt, input/output filters — measured as <span class="mono">ASR-with</span> vs <span class="mono">ASR-without</span> so you see what actually helps.</p>
+        </div>
+        <div class="card">
+          <div class="num">BENCHMARK</div>
+          <h3>Reproducible ASR</h3>
+          <p>Rollups by technique and by defense with a reproducibility stamp (tool version, corpus hash, seed). See the <a href="https://github.com/Dukotah/injectkit/blob/main/docs/BENCHMARK.md">benchmark methodology</a>.</p>
+        </div>
+      </div>
+      <p class="sub" style="margin-top:22px">
+        Full technique taxonomy:
+        <a href="https://github.com/Dukotah/injectkit/blob/main/docs/TAXONOMY.md">TAXONOMY.md</a>
+        · ASR methodology &amp; reproduction:
+        <a href="https://github.com/Dukotah/injectkit/blob/main/docs/BENCHMARK.md">BENCHMARK.md</a>
+        · authorized-research-only &amp; gated datasets:
+        <a href="https://github.com/Dukotah/injectkit/blob/main/docs/RESEARCH-USE.md">RESEARCH-USE.md</a>.
+      </p>
+    </div>
+  </section>
+
   <!-- ===================== INSTALL ===================== -->
   <section id="install">
     <div class="wrap">
@@ -302,6 +355,10 @@
 <pre class="block"><span class="c-prompt">$</span> pip install injectkit                 <span class="c-dim"># core: CLI, corpus, HTTP target, reports</span>
 <span class="c-prompt">$</span> pip install "injectkit[anthropic]"    <span class="c-dim"># + Anthropic Messages API target &amp; LLM judge</span>
 <span class="c-prompt">$</span> pip install "injectkit[mcp]"          <span class="c-dim"># + MCP server / agent tool-use target</span>
+<span class="c-prompt">$</span> pip install "injectkit[ollama]"       <span class="c-dim"># + local Ollama target + adaptive attacker (no key)</span>
+<span class="c-prompt">$</span> pip install "injectkit[openai]"       <span class="c-dim"># + OpenAI-compatible local server target (no key)</span>
+<span class="c-prompt">$</span> pip install "injectkit[hf]"           <span class="c-dim"># + in-process HuggingFace Transformers target</span>
+<span class="c-prompt">$</span> pip install "injectkit[research]"     <span class="c-dim"># + gated, opt-in research-dataset loaders</span>
 <span class="c-prompt">$</span> pip install "injectkit[all]"          <span class="c-dim"># everything</span></pre>
     </div>
   </section>
@@ -466,9 +523,20 @@
         </div>
       </div>
       <p class="sub" style="margin-top:22px">
+        <b>Benign canary proxy — no harmful content.</b> Every attack (including
+        transforms, multi-turn, and the adaptive attacker) asks the target to echo a
+        unique per-run marker it was told to withhold; a marker echo proves the
+        injection bypassed instructions with <b>zero</b> harmful output. injectkit
+        ships <b>no</b> harmful prompts or datasets — the research-dataset interface
+        only references official academic datasets and downloads them on
+        <b>explicit opt-in</b>.
+      </p>
+      <p class="sub" style="margin-top:14px">
         Found an injection issue in a product you're authorized to test? Follow that
-        vendor's responsible-disclosure process. Found a flaw in injectkit itself?
-        See <a href="https://github.com/Dukotah/injectkit/blob/main/SECURITY.md">SECURITY.md</a>.
+        vendor's responsible-disclosure process. See the
+        <a href="https://github.com/Dukotah/injectkit/blob/main/docs/RESEARCH-USE.md">research-use &amp; responsible-disclosure guide</a>.
+        Found a flaw in injectkit itself? See
+        <a href="https://github.com/Dukotah/injectkit/blob/main/SECURITY.md">SECURITY.md</a>.
       </p>
     </div>
   </section>
