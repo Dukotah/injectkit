@@ -36,6 +36,7 @@ from ..evaluators.heuristics import DEFAULT_TRIGGER
 __all__ = [
     "AttackConfig",
     "GCGConfig",
+    "PrefillConfig",
 ]
 
 
@@ -127,3 +128,37 @@ class GCGConfig(AttackConfig):
             trigger=self.trigger,
             seed=self.seed,
         )
+
+
+class PrefillConfig(AttackConfig):
+    """Typed config for the prefill attack family (arXiv:2602.14689).
+
+    Assistant-turn prefilling is a **one-shot** attack, not an optimisation loop:
+    the attacker writes the opening of the assistant's reply (a benign-seeming
+    prefix that pre-commits the model past its refusal point), the model greedily
+    completes it, and a judge grades the continuation. There is no gradient and no
+    per-step trajectory — so the GCG knobs (``suffix_len``/``top_k``/...) do not
+    apply and ``max_steps`` is effectively the number of candidate prefixes tried.
+
+    Adds the prefill-specific knobs on top of :class:`AttackConfig`:
+
+    * :attr:`candidate_prefixes` — the explicit prefix inventory to try. ``None``
+      (default) ⇒ the attack picks the model-specific bundled inventory for the
+      target's family (Llama-3/Qwen/Mistral/Gemma/Phi, or the GPT-OSS harmony
+      path), always including the generic benign prefix.
+    * :attr:`n_tokens` — greedy continuation length to generate and judge (the
+      paper's N=512 default).
+    * :attr:`use_target` — when False (default), success is judged on the model's
+      *generated continuation* alone (the realistic prefill condition: the prefix
+      is the assistant's own words). When True, the benign target marker is also
+      appended to the prefix as an explicit baseline override.
+    """
+
+    #: Explicit prefix inventory to try. ``None`` ⇒ model-specific bundled
+    #: inventory chosen by family at run time (always incl. the generic prefix).
+    candidate_prefixes: tuple[str, ...] | None = None
+    #: Greedy continuation length generated and judged per candidate (paper N=512).
+    n_tokens: int = Field(default=512, ge=1)
+    #: When True, also append the benign target marker to the prefix (explicit
+    #: baseline override). Default False — judge the model's own continuation.
+    use_target: bool = False
