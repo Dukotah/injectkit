@@ -90,7 +90,7 @@ include = ["injectkit*"]
 
 # Ship the bundled YAML attack corpus + white-box model-zoo registry in the wheel.
 [tool.setuptools.package-data]
-injectkit = ["corpus/*.yaml", "whitebox/*.yaml"]
+injectkit = ["corpus/*.yaml", "whitebox/*.yaml", "judge/*.jsonl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
