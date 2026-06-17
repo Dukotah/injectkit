@@ -40,6 +40,25 @@ from .zoo import (
 # Import the concrete attacks for their @register side effect (wires "gcg").
 from . import gcg  # noqa: E402,F401  (import-time registration)
 from .gcg import GCGAttack
+from .gcg_hard import (
+    AttackBuffer,
+    ProbeSamplingConfig,
+    PromptSlices,
+    filter_ids,
+    locate_optim_slice,
+    round_trips,
+    sample_candidates,
+    token_gradients_onehot,
+)
+from .targets import (
+    FIXED_BASELINE_PREFIX,
+    PrefixCandidate,
+    PrefixScore,
+    advprefix_target,
+    candidate_prefixes_for,
+    pareto_frontier,
+    select_advprefix,
+)
 
 __all__ = [
     "Attack",
@@ -54,6 +73,23 @@ __all__ = [
     "get_attack_class",
     "list_attacks",
     "GCGAttack",
+    # nanoGCG-parity hardening (CHUNK 3-gcg-advprefix).
+    "PromptSlices",
+    "locate_optim_slice",
+    "filter_ids",
+    "round_trips",
+    "token_gradients_onehot",
+    "sample_candidates",
+    "AttackBuffer",
+    "ProbeSamplingConfig",
+    # AdvPrefix target source (CHUNK 3-gcg-advprefix).
+    "advprefix_target",
+    "candidate_prefixes_for",
+    "select_advprefix",
+    "pareto_frontier",
+    "PrefixCandidate",
+    "PrefixScore",
+    "FIXED_BASELINE_PREFIX",
     # Model zoo (CHUNK 2-model-zoo).
     "ZOO_PATH",
     "ZooEntry",

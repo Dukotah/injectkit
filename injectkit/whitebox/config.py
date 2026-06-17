@@ -80,8 +80,27 @@ class GCGConfig(AttackConfig):
     suffix_len: int = Field(default=20, ge=1)
     #: Per-step number of candidate token swaps evaluated (the GCG batch).
     batch_size: int = Field(default=64, ge=1)
-    #: Top-k most-promising replacement tokens drawn from the gradient per slot.
+    #: Top-k most-promising replacement tokens drawn from the gradient per slot
+    #: (nanoGCG default 256).
     top_k: int = Field(default=256, ge=1)
+    #: Number of candidate single-token swaps scored per step in one batched
+    #: forward pass (nanoGCG's ``search_width``; default 512). Distinct from
+    #: ``batch_size``, which is the v0.3 per-slot sampler's budget.
+    search_width: int = Field(default=512, ge=1)
+    #: Best-suffix attack-buffer size (nanoGCG ``buffer_size``). 0 ⇒ keep only the
+    #: single best candidate; >0 ⇒ optimise from a pool to escape plateaus.
+    buffer_size: int = Field(default=0, ge=0)
+    #: Drop candidate suffixes that fail the tokenizer round-trip
+    #: ``encode(decode(ids)) == ids`` (the filter_ids correctness trap). Keep True
+    #: for correctness; exposed only so the trap itself can be tested both ways.
+    filter_nonascii: bool = True
+    #: nanoGCG ``probe_sampling`` toggle (draft-model candidate pre-filtering).
+    #: Off by default; the draft-model loop is a GPU deliverable (DEFERRED-NO-GPU).
+    probe_sampling: bool = False
+    #: When True (default), GCG's target prefix is the model-specific AdvPrefix
+    #: (arXiv:2412.10321); when False, the documented fixed "Sure, here is"
+    #: baseline. See :func:`injectkit.whitebox.targets.advprefix_target`.
+    use_advprefix: bool = True
     #: Initial benign filler suffix the optimiser starts from. ``None`` ⇒ the
     #: attacker's default benign filler. May be seeded from a research-gated
     #: AmpleGCG artifact, but the objective is re-pointed at the benign marker.

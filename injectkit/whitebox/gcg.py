@@ -30,11 +30,34 @@ from typing import Any, Optional
 from ..attackers.gcg import GCGSuffixAttacker
 from .base import Attack, AttackResult
 from .config import AttackConfig, GCGConfig
+from .gcg_hard import (
+    AttackBuffer,
+    PromptSlices,
+    ProbeSamplingConfig,
+    filter_ids,
+    locate_optim_slice,
+    round_trips,
+    sample_candidates,
+    token_gradients_onehot,
+)
 from .registry import register
+from .targets import FIXED_BASELINE_PREFIX, advprefix_target
 
 __all__ = [
     "GCGAttack",
     "run",
+    # nanoGCG-parity hardening primitives (chunk 3-gcg-advprefix).
+    "PromptSlices",
+    "locate_optim_slice",
+    "filter_ids",
+    "round_trips",
+    "token_gradients_onehot",
+    "sample_candidates",
+    "AttackBuffer",
+    "ProbeSamplingConfig",
+    # AdvPrefix target source.
+    "advprefix_target",
+    "FIXED_BASELINE_PREFIX",
 ]
 
 
@@ -96,6 +119,18 @@ class GCGAttack(Attack):
         """
         gcfg = cfg if isinstance(cfg, GCGConfig) else _as_gcg_config(cfg)
         prompt = _last_user_content(messages)
+
+        # AdvPrefix (arXiv:2412.10321) is the DEFAULT target source for GCG: when
+        # the caller does not pin an explicit target, derive a model-specific
+        # affirmative prefix (Pareto of prefill-success x low-NLL) for this model,
+        # else the documented fixed "Sure, here is" baseline. The marker stays the
+        # success condition, so the objective is benign.
+        if not target:
+            target = advprefix_target(
+                getattr(model, "name", "") or "",
+                trigger=gcfg.trigger,
+                use_baseline=not gcfg.use_advprefix,
+            )
 
         attacker = GCGSuffixAttacker(
             model,
