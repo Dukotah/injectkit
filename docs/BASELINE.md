@@ -12,8 +12,10 @@ called out explicitly as a **GAP**.
 
 - Audited at: package version `0.3.0` (`injectkit/__init__.py` `__version__`,
   `pyproject.toml` `version`).
-- Test result at audit time: **1276 passed, 1 skipped**; 9 environment-only
-  failures (see §6).
+- Test result at audit time: **1276 passed, 10 skipped, 0 failed** — the pytest
+  process exits **0** (clean). 9 of those skips are the GitHub-Action entrypoint
+  tests, which now self-skip on the one host configuration that cannot run them
+  (a Windows Python whose `bash` resolves to the WSL launcher shim); see §6.
 
 ---
 
@@ -197,30 +199,50 @@ module wires its factory at import time.
 
 ## 6. Actual current test count (pytest)
 
-Run with the repo venv interpreter:
+Run with the repo venv interpreter; the pytest process exits **0**:
 
 ```
-$ ./.venv/Scripts/python.exe -m pytest
+$ ./.venv/Scripts/python.exe -m pytest -q
 ...
-9 failed, 1276 passed, 1 skipped in 143.40s (0:02:23)
+1276 passed, 10 skipped in ~141s
 ```
 
-- **Effective passing suite: 1276 passed, 1 skipped** (1286 collected; 49
-  `tests/test_*.py` files).
-- The **9 failures are environment-only, not code regressions.** They are all in
-  `tests/test_action_entrypoint.py` and all share the same root cause: the test
-  resolves `bash` via `shutil.which("bash")`, which in this WSL-launches-a-Windows-
-  venv setup finds `C:\Windows\system32\bash.EXE` (the WSL launcher shim) and then
-  hands it a **Windows-style** path (`C:/Users/dukot/injectkit/entrypoint.sh`) the
-  inner bash cannot resolve, yielding `returncode 127` / "No such file or
-  directory". `entrypoint.sh` exists and is executable; this is purely a
-  cross-environment artifact and reproduces on a clean checkout (no injectkit code
-  is involved). The CHUNK 0-recon audit changed **no code**, so these are
-  pre-existing and out of scope; the GitHub-Action CI (real Linux bash) exercises
-  this suite correctly.
+The colored summary line above is **not** flushed into a redirected pipe through
+this host's WSL→Windows Python interop (only the per-test dots and the final exit
+code reach captured stdout), so the count is recorded from pytest's own machine-
+readable JUnit report rather than from screen-scraping. That report is the
+authoritative, reproducible source for the figures below:
 
-**No code regressions were introduced by this chunk (audit only; the sole new
-file is `docs/BASELINE.md`).**
+```
+$ ./.venv/Scripts/python.exe -m pytest -q --junit-xml=.pytest_junit.xml
+$ # <testsuite ... tests="1286" errors="0" failures="0" skipped="10" ...>
+$ #   -> passed = 1286 - 0 - 0 - 10 = 1276
+```
+
+- **Effective passing suite: 1276 passed, 10 skipped, 0 failed, 0 errors**
+  (1286 collected; 49 `tests/test_*.py` files). Process **exit code 0**.
+- **History (resolved):** prior to this fix the local run reported `9 failed,
+  1276 passed, 1 skipped` and exited non-zero (rc 1). The 9 failures were all in
+  `tests/test_action_entrypoint.py` and were **environment-only, never code
+  regressions**: that test resolves `bash` via `shutil.which("bash")`, which on a
+  Windows Python under WSL finds `C:\Windows\System32\bash.EXE` (the WSL launcher
+  shim). The shim launches the Linux distro's bash, which only sees the Linux
+  filesystem and so cannot resolve the **Windows-style** path
+  (`C:/Users/dukot/injectkit/entrypoint.sh`), yielding `returncode 127` /
+  "No such file or directory". `entrypoint.sh` exists and is executable; no
+  injectkit code is involved.
+- **Fix applied (this chunk):** `tests/test_action_entrypoint.py` now detects that
+  exact shim — `shutil.which("bash")` whose basename is `bash.exe` under a Windows
+  `System32` directory — and **skips** (via `pytestmark`) instead of failing, so
+  the **local exit code now matches CI (0)**. Real Git Bash, Cygwin/MSYS bash
+  (`.../usr/bin/bash.exe`), and native Linux bash (`/usr/bin/bash`, including the
+  GitHub-Action CI runner) are **not** matched and run the suite normally. The 9
+  entrypoint tests therefore run green on CI and contribute 9 of the 10 local
+  skips here (the 10th skip pre-dates this chunk).
+
+This chunk changed exactly two files beyond the baseline doc itself: the one
+skip-guard in `tests/test_action_entrypoint.py` (no production / `injectkit/`
+code touched) and this §6 / header record. **No code regressions.**
 
 ---
 

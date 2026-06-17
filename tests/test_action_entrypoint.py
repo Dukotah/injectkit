@@ -12,8 +12,18 @@ We verify:
     entrypoint itself exit non-zero (action.yml re-applies the gate);
   * summary parsing of a SARIF and a JSON report yields total/failed/highest.
 
-The tests are skipped if no ``bash`` interpreter is available (e.g. a bare
-Windows runner without Git Bash); on Windows with Git Bash / Cygwin they run.
+The tests are skipped if no usable ``bash`` interpreter is available (e.g. a
+bare Windows runner without Git Bash); on Windows with Git Bash / Cygwin they
+run, and on native Linux (including CI) they run.
+
+They are *also* skipped in one specific cross-environment configuration: when a
+Windows Python interpreter resolves ``bash`` to the Windows ``System32`` WSL
+launcher shim (``C:\\Windows\\System32\\bash.EXE``). That shim launches the WSL
+distro's bash, which cannot resolve the Windows-style ``C:/...`` path of
+``entrypoint.sh`` (it only sees the Linux filesystem), so every test here would
+fail with rc 127 / "No such file or directory". That is a host-interop artifact,
+not an entrypoint or injectkit bug, so we skip rather than report a spurious
+failure. Real Git Bash, Cygwin bash, and native Linux bash are unaffected.
 """
 
 from __future__ import annotations
@@ -32,9 +42,33 @@ ENTRYPOINT = REPO_ROOT / "entrypoint.sh"
 
 BASH = shutil.which("bash")
 
+
+def _is_wsl_launcher_shim(bash_path: str | None) -> bool:
+    """True if ``bash_path`` is the Windows System32 WSL launcher shim.
+
+    On a Windows Python interpreter, ``shutil.which("bash")`` frequently finds
+    ``C:\\Windows\\System32\\bash.exe`` -- this is *not* a POSIX bash, it is the
+    WSL launcher that drops into the Linux distro and therefore cannot resolve a
+    Windows-style path to ``entrypoint.sh``. Detect it by basename ``bash.exe``
+    living under a Windows ``System32`` directory. Git Bash / Cygwin / MSYS bash
+    (``.../usr/bin/bash.exe``) and native Linux bash (``/usr/bin/bash``) are not
+    matched.
+    """
+    if not bash_path:
+        return False
+    p = bash_path.replace("\\", "/").lower()
+    return p.endswith("/bash.exe") and "/windows/system32/" in p
+
+
+_WSL_SHIM = _is_wsl_launcher_shim(BASH)
+
 pytestmark = pytest.mark.skipif(
-    BASH is None or not ENTRYPOINT.is_file(),
-    reason="bash interpreter or entrypoint.sh not available",
+    BASH is None or not ENTRYPOINT.is_file() or _WSL_SHIM,
+    reason=(
+        "windows system32 wsl bash launcher cannot resolve the windows entrypoint path"
+        if _WSL_SHIM
+        else "bash interpreter or entrypoint.sh not available"
+    ),
 )
 
 
