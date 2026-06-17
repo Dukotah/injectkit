@@ -5,9 +5,73 @@ All notable changes to **injectkit** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased] — v0.4 white-box core integration
 
-_Nothing yet._
+The **white-box research core**: a license-clean, fully-offline white-box attack +
+judge + leaderboard stack, **library-complete and CPU-tested end-to-end**. Parts
+that genuinely require a 24 GB GPU + multi-GB downloads are marked
+**DEFERRED-NO-GPU** — their code paths exist and are exercised against tiny CPU
+models / offline seams, but are not executed at scale on the development host.
+Every objective is still the **benign canary marker**; no harmful target is set,
+and **no harmful artifact or Llama-derived weight is bundled**. Still offline-first
+and **defensive / authorized-use only**.
+
+### Added
+
+- **White-box attack ABC + registry + typed configs** (`injectkit/whitebox/`) — a
+  single typed `Attack` contract (`run(model, tokenizer, messages, target, cfg,
+  defense) -> AttackResult`), a name registry, and Pydantic configs. Additive to
+  the v0.3 `attackers/` package; the v0.3 GCG is re-wrapped onto it.
+- **Model zoo** (`injectkit/whitebox/zoo.py` + `zoo.yaml`) — white-box models
+  pinned by revision + quantisation for reproducible loads, with an offline CPU
+  demo seam. Real 7–20B loads are **DEFERRED-NO-GPU** (loader/seam tested offline).
+- **Hardened GCG (nanoGCG parity) + AdvPrefix** (`whitebox/gcg_hard.py`,
+  `whitebox/targets.py`) — one-hot token gradients, `top_k=256` /
+  `search_width=512` candidate sampling, an attack buffer, and two mandatory
+  correctness traps (round-trip `filter_ids`; tokenizer-agnostic chat-template
+  slice location across Llama-3 / Qwen2.5 / Gemma-2 / Mistral-v0.3 / Phi-4). A
+  **golden-loss tripwire** pins optimiser numerics within 5% on GPT-2 / Pythia-160M
+  (CPU). `probe_sampling` and full-8B ASR parity are **DEFERRED-NO-GPU** (knob
+  present, off by default). Grounded in nanoGCG (arXiv:2410.15362) and AdvPrefix
+  (arXiv:2412.10321). See `docs/REPRODUCE.md`.
+- **Prefill attack** (`injectkit/attacks/whitebox/prefill.py`) — an affirmative-
+  prefix prefill family registered on the white-box registry.
+- **Offline judge layer + calibration gate** (`injectkit/judge/`) — three signals
+  reported **separately and never collapsed**: substring-ASR, judge-ASR (default
+  `clean_cls`, an **MIT from-scratch** classifier, the only bundleable model
+  judge), and StrongREJECT-mean. A publication gate fails the build below
+  **κ ≥ 0.6 / agreement ≥ 0.85** or on a frozen prompt/feature-hash drift
+  (`assert_calibrated`). The Llama-derived `harmbench_cls` / `llama_guard` judges
+  are **optional gated loaders that never bundle weights** and error gracefully
+  without HF auth. The production ModernBERT/DeBERTa `clean_cls` backbone and the
+  LLM StrongREJECT autograder are **DEFERRED-NO-GPU**. See `docs/JUDGES.md`.
+- **Deterministic, backend-locked generation runner** (`injectkit/generate/`) —
+  greedy, byte-reproducible decoding through one seam, with a same-backend
+  invariant so a judge cannot score `hf`-generated text under a `vllm` backend (or
+  vice-versa). The `vllm` backend is **DEFERRED-NO-GPU**; the `hf` path is verified
+  on a tiny CPU model.
+- **Generalized bench harness + leaderboard + 8-field repro stamp**
+  (`injectkit/bench/`) and a new **`injectkit attack`** CLI subcommand — one cell
+  (`attack × model × behaviors × seeds × judge`) aggregates the three signals with
+  Wilson confidence intervals and the mandatory 8-field stamp (version,
+  corpus-hash, model-revision, seed, quant, judge-id, attack-id, backend; `quant`
+  never blank). Runs on a tiny CPU model offline; 8B fp16-vs-4bit anchor cells are
+  **DEFERRED-NO-GPU**.
+- **Docs** — `docs/BASELINE.md` (v0.3 recon that gates all v0.4 work),
+  `docs/REPRODUCE.md` (GCG parity / tolerance bands / honesty ledger), and
+  `docs/JUDGES.md` (judge licences, calibration floor, frozen hashes — assertions
+  enforced by the test suite).
+
+### Deferred (honest, DEFERRED-NO-GPU — implemented, not executed at scale here)
+
+- Loading/attacking any real 7–20B white-box model; published leaderboard numbers
+  for flagship-scale models.
+- Full GCG ASR parity (±10 abs pp) vs reference GCG; `probe_sampling` draft-model
+  loop; full-scale 8B AdvPrefix prefix mining.
+- The transformer `clean_cls` backbone; the LLM-backed StrongREJECT autograder;
+  the gated `llama_guard` / `harmbench_cls` 8B/13B loads; the vLLM backend.
+- The version string remains `0.3.0` (repro stamp included) until the release is
+  cut. Judge-in-the-loop attacks (REINFORCE-GCG, UJA) are scoped to v0.5.
 
 ## [0.3.0] — 2026-06-16
 

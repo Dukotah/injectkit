@@ -80,6 +80,67 @@ offline-by-default, and **defensive / authorized use only**.
 
 ---
 
+## What's new in v0.4 (white-box core integration — unreleased)
+
+v0.4 lands the **white-box research core**: a license-clean, fully-offline
+white-box attack + judge + leaderboard stack. It is **library-complete and
+CPU-tested end-to-end today**, with the parts that genuinely need a 24 GB GPU and
+multi-GB model downloads honestly marked **DEFERRED-NO-GPU** (the code paths exist
+and are exercised against tiny CPU models / offline seams — they are *not* faked).
+All objectives remain the **benign canary marker**; no harmful target is ever set.
+
+- **White-box attack ABC + registry + typed configs** (`injectkit/whitebox/`).
+  One typed contract (`run(model, tokenizer, messages, target, cfg, defense) ->
+  AttackResult`) every white-box family implements, a name registry, and Pydantic
+  configs. Additive to the v0.3 `attackers/` package; the v0.3 `gcg` is re-wrapped
+  onto it.
+- **Model zoo** (`injectkit/whitebox/zoo.py` + `zoo.yaml`). A pinned registry of
+  white-box models by **revision + quantisation** for reproducible loads. Loading
+  the real 7–20B entries needs a GPU (**DEFERRED-NO-GPU**); the loader/seam is
+  tested offline and an in-process **CPU demo seam** runs with no download.
+- **Hardened GCG (nanoGCG parity) + AdvPrefix** (`whitebox/gcg_hard.py`,
+  `whitebox/targets.py`). One-hot token gradients, `top_k=256` / `search_width=512`
+  candidate sampling, an attack buffer, and the two mandatory correctness traps
+  (round-trip `filter_ids`, tokenizer-agnostic chat-template slice location across
+  5 dense families). A **golden-loss tripwire** pins the optimiser numerics within
+  5% on GPT-2 / Pythia-160M (CPU). `probe_sampling` and full-8B ASR parity are
+  **DEFERRED-NO-GPU** (knob present, off). Grounded in nanoGCG (arXiv:2410.15362)
+  and AdvPrefix (arXiv:2412.10321). See [docs/REPRODUCE.md](docs/REPRODUCE.md).
+- **Prefill attack** (`injectkit/attacks/whitebox/prefill.py`). An affirmative-
+  prefix prefill family registered on the white-box registry.
+- **Offline judge layer + calibration gate** (`injectkit/judge/`). Three signals
+  reported **separately and never collapsed**: **substring-ASR**, **judge-ASR**
+  (default `clean_cls`, an **MIT from-scratch** classifier — the only bundleable
+  model judge), and **StrongREJECT-mean**. A publication gate fails the build if
+  the default judge falls below **κ ≥ 0.6 / agreement ≥ 0.85** or its frozen
+  prompt/feature hash drifts. The Llama-derived `harmbench_cls` / `llama_guard`
+  judges are **optional gated loaders that never bundle weights**. The production
+  ModernBERT/DeBERTa `clean_cls` backbone and the LLM StrongREJECT autograder are
+  **DEFERRED-NO-GPU**. See [docs/JUDGES.md](docs/JUDGES.md).
+- **Deterministic, backend-locked generation runner** (`injectkit/generate/`).
+  Greedy, byte-reproducible decoding through a single seam, with a **same-backend
+  invariant** so a judge can't score `hf`-generated text under a `vllm` backend (or
+  vice-versa). The `vllm` backend needs a GPU (**DEFERRED-NO-GPU**); the `hf` path
+  is verified on a tiny CPU model.
+- **Generalized bench harness + leaderboard + 8-field repro stamp**
+  (`injectkit/bench/`) and a new **`injectkit attack`** CLI subcommand. One cell —
+  `attack × model × behaviors × seeds × judge` — aggregates the three signals with
+  Wilson confidence intervals and the mandatory 8-field stamp (version, corpus-hash,
+  model-revision, seed, quant, judge-id, attack-id, backend). Runs on a tiny CPU
+  model offline; the 8B fp16-vs-4bit anchor cells are **DEFERRED-NO-GPU**.
+
+> ℹ️ **What v0.4 does NOT yet do.** No real 7–20B white-box model is loaded or
+> attacked on the development host (no GPU). The published leaderboard *numbers*
+> for flagship-scale models, full GCG ASR parity, `probe_sampling`, full-scale
+> AdvPrefix prefix mining, the transformer `clean_cls` backbone, the LLM-backed
+> StrongREJECT autograder, the gated Llama judges, and the vLLM backend are all
+> **DEFERRED-NO-GPU** — implemented in code and tested against tiny/offline seams,
+> but not executed at scale here. The repro stamp still records `version 0.3.0`
+> until the release is cut. Judge-in-the-loop attacks (REINFORCE-GCG, UJA) are
+> v0.5.
+
+---
+
 ## What's new in v0.2.0
 
 injectkit grew from a single pass/fail scan into a reproducible **robustness
