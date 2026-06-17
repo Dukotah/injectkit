@@ -25,6 +25,17 @@ from .registry import (
     register,
     registry,
 )
+from .zoo import (
+    ZOO_PATH,
+    ZooEntry,
+    ZooError,
+    check_attack_supported,
+    get_entry,
+    list_models,
+    load_by_revision,
+    load_model,
+    load_zoo,
+)
 
 # Import the concrete attacks for their @register side effect (wires "gcg").
 from . import gcg  # noqa: E402,F401  (import-time registration)
@@ -43,4 +54,14 @@ __all__ = [
     "get_attack_class",
     "list_attacks",
     "GCGAttack",
+    # Model zoo (CHUNK 2-model-zoo).
+    "ZOO_PATH",
+    "ZooEntry",
+    "ZooError",
+    "check_attack_supported",
+    "get_entry",
+    "list_models",
+    "load_by_revision",
+    "load_model",
+    "load_zoo",
 ]

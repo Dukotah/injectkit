@@ -1,0 +1,105 @@
+# injectkit v0.4 model zoo — pinned HuggingFace revisions for the white-box lane.
+#
+# CHUNK 2-model-zoo (ROADMAP §6.0 "checked against the zoo's arch flag", §6.14,
+# §8). This registry is the single source of truth the white-box loader
+# (`injectkit/whitebox/zoo.py`) resolves: name -> (repo, pinned revision, arch,
+# supported_attacks). It deliberately lives beside the rest of the v0.4 white-box
+# interface (the flat-layout package already owns a top-level `models.py` module,
+# so a `models/` package would shadow it — same reasoning that put the typed
+# configs in `whitebox/config.py`; see that file's module docstring).
+#
+# PINNING POLICY (ROADMAP §8 "pinned revisions are stable; no live version
+# resolution"): every `revision` is a *full 40-hex commit SHA* captured once from
+# the HuggingFace Hub, NOT a branch name like `main`. A SHA is immutable, so a run
+# stamped with it is reproducible forever even if the repo's `main` moves. The
+# loader REFUSES a non-immutable revision (branch/tag/short-sha) so a zoo entry
+# can never silently float.
+#
+# arch:
+#   dense -> a standard dense causal-transformer with a stable per-token backward
+#            pass. Gradient-family attacks (GCG and relatives) are supported.
+#   moe   -> mixture-of-experts. Routing is non-differentiable, so GCG-family
+#            gradient attacks are NOT supported (ROADMAP §6.14); only gradient-free
+#            families (e.g. prefill) are listed under supported_attacks.
+#
+# supported_attacks: the v0.4 attack registry keys this model may be driven with.
+#   For v0.4 the GCG family is DENSE-ONLY. The loader cross-checks each name here
+#   against an attack's declared `supported_arch` before any run, so a mismatch is
+#   caught up front (ROADMAP §6.0/§8 "supported_attacks vs supported_arch").
+#
+# default_dtype: the load precision the loader uses when the caller does not pass
+#   one. fp16 for the dense models (the white-box optimisers want fp16 + a GPU);
+#   the 20B MoE defaults to 4bit so it fits a 24GB card (4/8-bit quant goes through
+#   accelerate + bitsandbytes; see the loader). The chosen quant is recorded in the
+#   reproducibility stamp (`fp16|8bit|4bit`).
+#
+# NOTE: the >=5 dense 7–9B models and the 20B MoE require a GPU + a multi-GB
+# download to actually instantiate. In the CPU/no-GPU CI host the loader path is
+# exercised against a TINY model (GPT-2 / Pythia-160M); the big loads are
+# DEFERRED-NO-GPU. The metadata below is still resolved, validated, and stamped
+# without downloading anything.
+
+# Schema/format version of this registry file (the loader pins to v1).
+version: 1
+
+models:
+  # ---------------------------------------------------------------- dense ----
+  llama-3.1-8b:
+    repo: meta-llama/Llama-3.1-8B-Instruct
+    revision: 0e9e39f249a16976918f6564b8830bc894c89659
+    arch: dense
+    params_b: 8.0
+    default_dtype: fp16
+    supported_attacks: [gcg]
+    gated: true        # HF access request required; license is non-permissive.
+    notes: >-
+      Llama 3.1 Community License (NON-permissive, gated). Referenced for
+      benchmarking only; never bundled. See docs/BASELINE.md §7.
+
+  qwen2.5-7b:
+    repo: Qwen/Qwen2.5-7B-Instruct
+    revision: a09a35458c702b33eeacc393d103063234e8bc28
+    arch: dense
+    params_b: 7.0
+    default_dtype: fp16
+    supported_attacks: [gcg]
+    gated: false       # Apache-2.0.
+
+  gemma-2-9b:
+    repo: google/gemma-2-9b-it
+    revision: 11c9b309abf73637e4b6f9a3fa1e92e615547819
+    arch: dense
+    params_b: 9.0
+    default_dtype: fp16
+    supported_attacks: [gcg]
+    gated: true        # Gemma license; HF access acknowledgement required.
+
+  mistral-7b-v0.3:
+    repo: mistralai/Mistral-7B-Instruct-v0.3
+    revision: c170c708c41dac9275d15a8fff4eca08d52bab71
+    arch: dense
+    params_b: 7.0
+    default_dtype: fp16
+    supported_attacks: [gcg]
+    gated: false       # Apache-2.0.
+
+  phi-4:
+    repo: microsoft/phi-4
+    revision: 932b33c0ec9ca189badeb22480721a8de9d0e006
+    arch: dense
+    params_b: 14.7
+    default_dtype: fp16
+    supported_attacks: [gcg]
+    gated: false       # MIT.
+
+  # ------------------------------------------------------------------ moe ----
+  gpt-oss-20b:
+    repo: openai/gpt-oss-20b
+    revision: 6cee5e81ee83917806bbde320786a8fb61efebee
+    arch: moe
+    params_b: 21.0
+    default_dtype: 4bit   # ~21B MoE: 4-bit so it fits a 24GB card.
+    # GCG/gradient families are dense-only (ROADMAP §6.14): MoE routing is
+    # non-differentiable. Only gradient-free attacks are listed.
+    supported_attacks: [prefill]
+    gated: false       # Apache-2.0.
