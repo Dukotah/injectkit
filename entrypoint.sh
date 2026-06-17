@@ -16,6 +16,20 @@
 # at a temp file.
 set -uo pipefail
 
+# Resolve a Python interpreter once. Honor an explicit ${PYTHON} override, then
+# prefer `python`, then fall back to `python3` (modern Linux/CI images often
+# ship only `python3`). Used both to invoke the CLI (`python -m injectkit`) and
+# the stdlib report parser below.
+if [ -z "${PYTHON:-}" ]; then
+  if command -v python >/dev/null 2>&1; then
+    PYTHON="python"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
+  else
+    PYTHON="python"  # last resort; parse_report degrades gracefully if absent
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
