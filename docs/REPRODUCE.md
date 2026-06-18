@@ -129,6 +129,31 @@ model** with no model load (verified in `tests/test_whitebox_gcg_hard.py`).
 
 ---
 
+## 5b. I-GCG / Faster-GCG / Mask-GCG / momentum variants (CHUNK 9) — DEFERRED NUMBERS
+
+The chunk-9 GCG variants are **implemented in full** on the shared
+greedy-coordinate-gradient core (they reuse the same gradient / forward plumbing,
+so the §2 golden-loss tripwire covers their numerics too). Each mechanism's LOGIC
+is verified on the tiny CPU path / stub seam in
+`tests/test_whitebox_igcg_faster_gcg.py`; the published headline NUMBERS need a
+7-8B GPU run and are **DEFERRED-NO-GPU**:
+
+| Variant | Module | Mechanisms (verified on CPU) | Deferred number |
+|---------|--------|------------------------------|-----------------|
+| **I-GCG** (arXiv:2405.21018, ICLR 2025) | `whitebox/igcg.py` | diverse BENIGN target templates; automatic multi-coordinate (top-`p`, auto-adapted) update; easy-to-hard init | **~100% ASR on Vicuna-7B / Llama-2-7B-chat** |
+| **Faster-GCG** (arXiv:2410.15362) | `whitebox/faster_gcg.py` | distance-regularized gradient scoring; temperature candidate sampling; visited-set dedup | **wall-clock speedup vs GCG** |
+| **Mask-GCG** (arXiv:2509.06350) | `whitebox/mask_gcg.py` | per-position importance + prune mask (freeze redundant slots) | full-scale efficiency number |
+| **momentum** (MAC, arXiv:2405.01229) | `whitebox/gcg_variants.py` | EMA gradient blending (`GCGConfig.momentum`, flag) | published ASR gain |
+| **MAGIC** (arXiv:2412.08615) | `whitebox/gcg_variants.py` | adaptive multi-coordinate count (`GCGConfig.magic`, flag) | published query saving |
+| **SM-GCG** | `whitebox/gcg_variants.py` | simulated-annealing acceptance (`GCGConfig.sm_gcg_temperature`, flag) | published ASR gain |
+
+The momentum / MAGIC / SM-GCG flags default OFF, so plain `GCGConfig` is
+byte-for-byte plain GCG (verified). Every objective stays the benign canary
+marker; I-GCG's "diverse harmful targets" become diverse benign affirmative
+openers — no harmful string is bundled or targeted.
+
+---
+
 ## 6. Honesty ledger (what is and isn't run here)
 
 | Check | Runs on this host? |
@@ -142,6 +167,8 @@ model** with no model load (verified in `tests/test_whitebox_gcg_hard.py`).
 | Probe Sampling draft→target re-scoring logic | ✅ yes (CPU, tiny seams + tiny-GPT-2 importorskip) |
 | Probe Sampling ≥3× wall-clock speedup + ASR on 8B | ❌ DEFERRED-NO-GPU (code path complete, number not timed) |
 | AdvPrefix full-scale 8B prefix mining | ❌ DEFERRED-NO-GPU (algorithm tested on CPU) |
+| I-GCG / Faster-GCG / Mask-GCG / momentum mechanisms (logic) | ✅ yes (CPU, stub seam + golden-loss tripwire) |
+| I-GCG ~100% ASR on 7B / Faster-GCG wall-clock speedup | ❌ DEFERRED-NO-GPU (code path complete, number not run) |
 
 The deferred rows are **implemented in code** (the full path exists and is
 imported); they are not *executed* here because the host has no GPU and cannot

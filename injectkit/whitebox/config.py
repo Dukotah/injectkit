@@ -36,6 +36,9 @@ from ..evaluators.heuristics import DEFAULT_TRIGGER
 __all__ = [
     "AttackConfig",
     "GCGConfig",
+    "IGCGConfig",
+    "FasterGCGConfig",
+    "MaskGCGConfig",
     "PrefillConfig",
 ]
 
@@ -113,6 +116,27 @@ class GCGConfig(AttackConfig):
     #: AmpleGCG artifact, but the objective is re-pointed at the benign marker.
     init_suffix: str | None = None
 
+    # --- Optional completeness-tier variants (flags, never blockers) -----------
+    # Each toggles a published GCG refinement on the shared coordinate-descent
+    # core. Default OFF ⇒ behaviour is byte-for-byte plain GCG. These are knobs,
+    # not separate attacks: they perturb gradient aggregation / candidate
+    # selection only, never the (benign-marker) objective.
+    #: Momentum-accelerated gradient aggregation (MAC, arXiv:2405.01229): blend
+    #: each step's token gradient with an exponentially-decayed running average so
+    #: the coordinate search escapes shallow local minima. ``0.0`` (default) ⇒ no
+    #: momentum (plain GCG). A value in ``[0, 1)`` is the momentum coefficient β.
+    momentum: float = Field(default=0.0, ge=0.0, lt=1.0)
+    #: MAGIC (arXiv:2412.08615) — gradient-informed *adaptive multi-coordinate*
+    #: update that grows the number of slots updated per step from the gradient's
+    #: own signal (saves queries vs single-coordinate GCG). Flag only; off ⇒ plain
+    #: single-coordinate GCG.
+    magic: bool = False
+    #: SM-GCG — simulated-annealing / momentum candidate acceptance: accept a
+    #: non-improving swap with a temperature-decayed probability to escape
+    #: plateaus (a softened greedy acceptance). ``0.0`` (default) ⇒ strict greedy
+    #: GCG. A positive value is the initial acceptance temperature.
+    sm_gcg_temperature: float = Field(default=0.0, ge=0.0)
+
     @field_validator("probe_sampling")
     @classmethod
     def _validate_probe_sampling(cls, value: Any) -> Any:
@@ -151,6 +175,121 @@ class GCGConfig(AttackConfig):
             trigger=self.trigger,
             seed=self.seed,
         )
+
+
+class IGCGConfig(GCGConfig):
+    """Typed config for I-GCG (Jia et al., **arXiv:2405.21018**, ICLR 2025).
+
+    I-GCG ("Improved Techniques for Optimization-Based Jailbreaking on Large
+    Language Models") is GCG plus three orthogonal, compounding improvements,
+    each a knob here on top of the shared :class:`GCGConfig` core:
+
+    * **Diverse harmful-target templates** (:attr:`num_diverse_targets`). Vanilla
+      GCG fixes one affirmative target prefix (``"Sure, here is"``). I-GCG instead
+      optimises against a *set* of diverse target templates and, per step, drives
+      the suffix toward the *easiest currently-unsatisfied* target — which
+      smooths the loss landscape and avoids over-fitting one phrasing. In
+      injectkit every template is a BENIGN marker-emitting opener (the canary is
+      always the success condition), so "diverse harmful targets" becomes
+      "diverse benign affirmative openers" — never harmful content.
+    * **Automatic multi-coordinate update** (:attr:`auto_p_adaptation`). Rather
+      than replacing a single token per step, I-GCG replaces the top-``p`` worst
+      (highest-loss-contribution) tokens each step, with ``p`` *auto-adapted* from
+      progress: ``p`` grows while loss is falling and shrinks when it stalls.
+      :attr:`init_p` seeds it; :attr:`max_p` caps it.
+    * **Easy-to-hard initialization** (:attr:`easy_to_hard_init`). The suffix is
+      seeded from a suffix already solved for an *easier* behavior (a curriculum),
+      so a hard behavior starts from a strong basin instead of the ``"! ! !"``
+      filler. :attr:`init_suffix` (inherited) supplies the seed when given.
+
+    The headline ~100% ASR on Vicuna-7B / Llama-2-7B-chat is **DEFERRED-NO-GPU**:
+    the three mechanisms' LOGIC is verified on the tiny CPU path; the ASR number
+    needs a 7B GPU run.
+    """
+
+    #: Number of diverse (benign) affirmative target templates to rotate over;
+    #: per step the suffix is driven toward the easiest currently-unsatisfied one.
+    #: ``1`` ⇒ the single-target classic GCG behaviour.
+    num_diverse_targets: int = Field(default=4, ge=1)
+    #: Auto-adapt the multi-coordinate update width ``p`` (top-``p`` worst tokens
+    #: replaced per step) from optimisation progress. ``False`` ⇒ fixed ``init_p``.
+    auto_p_adaptation: bool = True
+    #: Initial number of coordinates (suffix slots) replaced per step.
+    init_p: int = Field(default=1, ge=1)
+    #: Upper bound on the auto-adapted coordinate-update width ``p``.
+    max_p: int = Field(default=4, ge=1)
+    #: Enable easy-to-hard curriculum initialization (seed the suffix from a
+    #: solved easier behavior via the inherited :attr:`init_suffix`). When ``True``
+    #: and no ``init_suffix`` is given, the bundled easy seed is used.
+    easy_to_hard_init: bool = True
+
+
+class FasterGCGConfig(GCGConfig):
+    """Typed config for Faster-GCG (Li et al., **arXiv:2410.15362**).
+
+    Faster-GCG ("Faster-GCG: Efficient Discrete Optimization Jailbreak Attacks
+    Against Aligned Large Language Models") accelerates GCG's discrete search with
+    three changes, each a knob here on top of the shared :class:`GCGConfig`:
+
+    * **Distance-regularized gradient estimation** (:attr:`distance_reg_lambda`).
+      The greedy one-hot gradient over-trusts the linearisation far from the
+      current token; Faster-GCG adds a regulariser that penalises candidate tokens
+      by their *embedding distance* from the current token, so the gradient score
+      stays accurate near the operating point and the search wastes fewer
+      forward passes on mis-ranked far-away tokens. ``0.0`` ⇒ plain GCG gradient.
+    * **Temperature sampling over candidates** (:attr:`temp_sampling`). Instead of
+      a hard top-``k`` cut, candidates are sampled with a softmax over their
+      (regularised) gradient scores at temperature :attr:`temperature` — exploring
+      promising-but-not-top tokens and reducing the redundancy of repeatedly
+      trying the same hard-top-``k`` set. ``False`` ⇒ classic hard top-``k``.
+    * **Visited-set deduplication** (:attr:`visited_set_size`). A bounded set of
+      already-evaluated suffixes is kept so the search never re-scores a candidate
+      it has already seen, breaking the cycles that waste GCG queries near a
+      plateau. ``0`` ⇒ no dedup (plain GCG).
+
+    The headline wall-clock speedup over GCG is **DEFERRED-NO-GPU**: the three
+    mechanisms' LOGIC is verified on the tiny CPU path; the speedup number needs a
+    real 7-8B GPU run to time.
+    """
+
+    #: Coefficient λ of the embedding-distance regulariser added to the candidate
+    #: gradient score (penalises tokens far from the current one). ``0.0`` ⇒ off.
+    distance_reg_lambda: float = Field(default=0.1, ge=0.0)
+    #: Use temperature (softmax) sampling over candidate gradient scores instead of
+    #: a hard top-``k`` cut. ``False`` ⇒ classic hard top-``k`` sampling.
+    temp_sampling: bool = True
+    #: Softmax temperature for :attr:`temp_sampling` (higher ⇒ flatter / more
+    #: exploratory). Ignored when :attr:`temp_sampling` is ``False``.
+    temperature: float = Field(default=1.0, gt=0.0)
+    #: Capacity of the visited-suffix dedup set (LRU-bounded). ``0`` ⇒ no dedup.
+    visited_set_size: int = Field(default=1024, ge=0)
+
+
+class MaskGCGConfig(GCGConfig):
+    """Typed config for Mask-GCG token-position pruning (**arXiv:2509.06350**).
+
+    Mask-GCG ("Mask-GCG: Pruning Redundant Token Positions for Efficient
+    Adversarial Suffix Optimization") observes that only a subset of the suffix
+    *positions* actually carry the attack: it learns a per-position importance
+    mask and *prunes* (freezes) the low-importance positions so each step only
+    optimises the slots that matter — fewer candidate evaluations for the same
+    ASR. The objective is unchanged (the benign marker); pruning only narrows
+    *which slots* are mutated.
+
+    LOGIC verified on the tiny CPU path; the full-scale efficiency number is
+    DEFERRED-NO-GPU.
+    """
+
+    #: Fraction of suffix positions to KEEP active after pruning (``0 < x <= 1``);
+    #: the remaining lowest-importance positions are frozen. ``1.0`` ⇒ no pruning
+    #: (plain GCG over all positions).
+    keep_fraction: float = Field(default=0.5, gt=0.0, le=1.0)
+    #: Number of warmup steps optimising ALL positions before importance is
+    #: scored and the prune mask is applied (so the mask is informed, not random).
+    warmup_steps: int = Field(default=1, ge=0)
+    #: Minimum number of positions always kept active regardless of
+    #: :attr:`keep_fraction` (so a short suffix is never fully frozen).
+    min_active: int = Field(default=1, ge=1)
 
 
 class PrefillConfig(AttackConfig):

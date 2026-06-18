@@ -168,9 +168,20 @@ class GCGAttack(Attack):
         # Drive the proven inner loop directly through the white-box seam so we
         # capture the optimisation trajectory (the loss curve + best suffix). This
         # reuses GCGSuffixAttacker._optimize_suffix verbatim — no re-implementation.
+        #
+        # Optional completeness-tier variants (momentum / MAGIC / SM-GCG, chunk 9)
+        # ship as FLAGS on GCGConfig, never separate attacks or blockers. When any
+        # is set we route through the variant-aware loop (which still reuses the
+        # attacker's proven per-slot primitives); with all flags at their defaults
+        # the verbatim legacy path runs, so behaviour is byte-for-byte plain GCG.
         prompt_ids = model.token_ids(prompt)
         target_ids = model.token_ids(target)
-        steps = attacker._optimize_suffix(prompt_ids, target_ids)
+        if _variants_enabled(gcfg):
+            steps = _optimize_with_variants(
+                model, attacker, gcfg, list(prompt_ids), list(target_ids)
+            )
+        else:
+            steps = attacker._optimize_suffix(prompt_ids, target_ids)
 
         best = attacker._best_step(steps)
         best_suffix = best.suffix if best is not None else attacker.init_suffix
@@ -191,6 +202,101 @@ class GCGAttack(Attack):
             queries=len(steps),
             defense_id=defense_id,
         )
+
+
+def _variants_enabled(cfg: GCGConfig) -> bool:
+    """True iff any optional completeness-tier variant flag is set (chunk 9).
+
+    With all three at their defaults (``momentum=0``, ``magic=False``,
+    ``sm_gcg_temperature=0``) this is False and the verbatim legacy GCG path runs.
+    """
+    return bool(cfg.momentum > 0.0 or cfg.magic or cfg.sm_gcg_temperature > 0.0)
+
+
+def _optimize_with_variants(
+    model: Any,
+    attacker: "GCGSuffixAttacker",
+    cfg: GCGConfig,
+    prompt_ids: list[int],
+    target_ids: list[int],
+) -> "list[Any]":
+    """GCG coordinate loop with the optional momentum / MAGIC / SM-GCG variants.
+
+    Reuses the attacker's proven per-slot primitives (``_top_k_candidates`` /
+    ``_sample_candidates`` / the seam ``target_loss``); the variants only perturb
+    *gradient aggregation* (momentum, arXiv:2405.01229), *how many slots update per
+    step* (MAGIC, arXiv:2412.08615), and *which swaps are accepted* (SM-GCG
+    simulated-annealing). The objective is unchanged (benign marker). Returns the
+    same ``list[GCGStep]`` shape the legacy loop returns so the caller is agnostic.
+    """
+    import random as _random
+
+    from ..attackers.whitebox_base import GCGStep
+    from .gcg_variants import (
+        MomentumState,
+        anneal_temperature,
+        magic_coordinate_count,
+        sm_accept,
+    )
+
+    rng = _random.Random(cfg.seed)
+    momentum = MomentumState(cfg.momentum)
+    target_text = model.decode(target_ids)
+
+    suffix_ids = list(model.token_ids(attacker.init_suffix)) or [0]
+    steps: list[Any] = []
+
+    for step_no in range(1, cfg.max_steps + 1):
+        input_ids = list(prompt_ids) + list(suffix_ids)
+        suffix_slice = slice(len(prompt_ids), len(input_ids))
+        grads = model.token_gradients(input_ids, target_ids, suffix_slice)
+        # Momentum (arXiv:2405.01229): blend with the decayed running average.
+        grads = momentum.blend(grads)
+
+        # MAGIC (arXiv:2412.08615): adaptive number of slots to update this step.
+        if cfg.magic:
+            n_coords = magic_coordinate_count(
+                grads, max_coords=len(suffix_ids), min_coords=1
+            )
+            # Update the n_coords slots with the strongest best-candidate signal.
+            strengths = [abs(min(r)) if r else 0.0 for r in grads]
+            slots = sorted(
+                range(len(suffix_ids)), key=lambda i: (-strengths[i], i)
+            )[:n_coords]
+        else:
+            slots = list(range(len(suffix_ids)))
+
+        # SM-GCG simulated-annealing acceptance temperature for this step.
+        temp = anneal_temperature(cfg.sm_gcg_temperature, step_no - 1)
+
+        best_ids = list(suffix_ids)
+        best_loss = float(model.target_loss(list(prompt_ids) + best_ids, target_ids))
+        for slot in slots:
+            candidates = attacker._top_k_candidates(grads, slot)
+            if not candidates:
+                continue
+            for token_id in attacker._sample_candidates(candidates):
+                if token_id == best_ids[slot]:
+                    continue
+                trial = list(best_ids)
+                trial[slot] = token_id
+                loss = float(model.target_loss(list(prompt_ids) + trial, target_ids))
+                delta = loss - best_loss
+                # SM-GCG: accept improvements always, non-improving swaps with the
+                # annealed Metropolis probability (temp<=0 ⇒ strict greedy).
+                if sm_accept(delta, temp, rng):
+                    best_loss = loss
+                    best_ids = trial
+        suffix_ids = best_ids
+
+        suffix_text = model.decode(suffix_ids)
+        succeeded = bool(target_text) and target_text in suffix_text
+        steps.append(
+            GCGStep(step=step_no, suffix=suffix_text, loss=best_loss, succeeded=succeeded)
+        )
+        if succeeded:
+            break
+    return steps
 
 
 def _as_gcg_config(cfg: AttackConfig) -> GCGConfig:

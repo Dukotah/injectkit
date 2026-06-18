@@ -16,7 +16,14 @@ DEFENSIVE / AUTHORIZED USE ONLY.
 from __future__ import annotations
 
 from .base import ArchitectureError, Attack, AttackResult
-from .config import AttackConfig, GCGConfig, PrefillConfig
+from .config import (
+    AttackConfig,
+    FasterGCGConfig,
+    GCGConfig,
+    IGCGConfig,
+    MaskGCGConfig,
+    PrefillConfig,
+)
 from .registry import (
     AttackRegistry,
     get_attack,
@@ -37,9 +44,16 @@ from .zoo import (
     load_zoo,
 )
 
-# Import the concrete attacks for their @register side effect (wires "gcg").
+# Import the concrete attacks for their @register side effect (wires "gcg" and the
+# chunk-9 variants "igcg" / "faster_gcg" / "mask_gcg").
 from . import gcg  # noqa: E402,F401  (import-time registration)
+from . import faster_gcg as _faster_gcg  # noqa: E402,F401  (registration)
+from . import igcg as _igcg  # noqa: E402,F401  (registration)
+from . import mask_gcg as _mask_gcg  # noqa: E402,F401  (registration)
+from .faster_gcg import FasterGCGAttack
 from .gcg import GCGAttack
+from .igcg import IGCGAttack
+from .mask_gcg import MaskGCGAttack
 
 # Wire the prefill attack ("prefill"). It lives under attacks/whitebox/ (the chunk
 # spec's path) but registers on THIS registry, so it resolves like gcg.
@@ -77,6 +91,25 @@ from .probe_sampling import (
     ProbeSamplingResult,
     resolve_probe_sampling,
 )
+from .igcg import (
+    adapt_p,
+    diverse_targets,
+    easiest_target,
+    easy_to_hard_seed,
+    worst_coordinates,
+)
+from .faster_gcg import (
+    VisitedSet,
+    distance_regularized_scores,
+    temperature_sample,
+)
+from .mask_gcg import position_importance, prune_mask
+from .gcg_variants import (
+    MomentumState,
+    anneal_temperature,
+    magic_coordinate_count,
+    sm_accept,
+)
 from .targets import (
     FIXED_BASELINE_PREFIX,
     PrefixCandidate,
@@ -93,6 +126,9 @@ __all__ = [
     "ArchitectureError",
     "AttackConfig",
     "GCGConfig",
+    "IGCGConfig",
+    "FasterGCGConfig",
+    "MaskGCGConfig",
     "PrefillConfig",
     "AttackRegistry",
     "registry",
@@ -101,6 +137,24 @@ __all__ = [
     "get_attack_class",
     "list_attacks",
     "GCGAttack",
+    # GCG variants (CHUNK 9-igcg-faster-gcg).
+    "IGCGAttack",
+    "FasterGCGAttack",
+    "MaskGCGAttack",
+    "diverse_targets",
+    "easiest_target",
+    "adapt_p",
+    "worst_coordinates",
+    "easy_to_hard_seed",
+    "VisitedSet",
+    "distance_regularized_scores",
+    "temperature_sample",
+    "position_importance",
+    "prune_mask",
+    "MomentumState",
+    "magic_coordinate_count",
+    "anneal_temperature",
+    "sm_accept",
     # Prefill attack (CHUNK 5-prefill-attack; arXiv:2602.14689).
     "PrefillAttack",
     # nanoGCG-parity hardening (CHUNK 3-gcg-advprefix).
