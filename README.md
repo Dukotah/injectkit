@@ -80,6 +80,48 @@ offline-by-default, and **defensive / authorized use only**.
 
 ---
 
+## What's new in v0.5 (judge-in-the-loop attackers — unreleased)
+
+v0.5 lands the **judge-in-the-loop white-box attackers** on the v0.4 ABC/registry:
+the offline judge layer becomes the **in-loop reward signal** that steers token
+optimization, not just a post-hoc grader. It is **library-complete and CPU-tested
+offline** against tiny / offline seams + the deterministic mock judge; the at-scale
+run (real 7–20B + a real judge reward) is honestly **DEFERRED-NO-GPU** (the code path
+exists and is exercised, *not* faked). All objectives remain the **benign canary
+marker**; no harmful target is ever set, sampled, or rewarded.
+
+- **REINFORCE-GCG** (`reinforce_gcg`) — judge-in-the-loop GCG. Instead of GCG's single
+  teacher-forced target NLL, candidate selection is steered by a **REINFORCE reward**:
+  the model's own continuation is generated and scored by an in-loop judge, and the
+  combined objective is `nll − reward_weight · reward` (the *adaptive, distributional,
+  semantic* objective). At `reward_weight = 0` it reduces exactly to plain GCG.
+  Grounded in REINFORCE-GCG (arXiv:2502.17924). It **reuses** the hardened
+  `gcg_hard.py` machinery and the proven GCG inner loop — no duplicated optimizer.
+- **UJA — Universal Jailbreak Adversarial** (`uja`) — optimizes **one universal
+  suffix** across a *set* of benign-canary behaviors at once, re-ranked by the **mean**
+  in-loop judge reward across the batch; success requires transfer to a majority of
+  behaviors. Grounded in the universal/transferable GCG objective (arXiv:2307.15043).
+- **Optimisation-judge ≠ evaluation-judge firewall.** The in-loop optimisation judge
+  must differ from the leaderboard evaluation judge so the optimizer cannot game its
+  own grader — `opt_judge = substring`, `eval_judge = clean_cls` by default;
+  `assert_opt_judge_distinct` raises `OptJudgeCircularityError` otherwise. Grounded in
+  the judge-circularity finding (arXiv:2502.11910). See [docs/JUDGES.md](docs/JUDGES.md) §6.
+- **Registry + CLI surface.** Both attacks register on the white-box attack registry
+  and run through the existing `injectkit attack` and `injectkit capability`
+  subcommands (`--attack reinforce_gcg` / `--attack uja`) and the bench harness —
+  fully offline on the demo seam. Dense-only (gradient family; the zoo's dense models
+  list them under `supported_attacks`).
+
+> ℹ️ **What v0.5 defers (DEFERRED-NO-GPU).** No real 7–20B model is loaded or attacked
+> here (no GPU); the real-judge reward signal, the full sampled REINFORCE
+> distributional estimate, and universal-transfer ASR over a large held-out behavior
+> set are implemented and exercised against tiny/offline seams + the deterministic
+> mock judge, but not run at scale. The honest frontier-robustness caveat below stands:
+> a judge-in-the-loop attacker *measures* robustness, it does not "jailbreak anything".
+> See [docs/REPRODUCE.md](docs/REPRODUCE.md) §5b and [docs/RESEARCH.md](docs/RESEARCH.md).
+
+---
+
 ## What's new in v0.4 (white-box core integration — unreleased)
 
 v0.4 lands the **white-box research core**: a license-clean, fully-offline
@@ -150,7 +192,7 @@ All objectives remain the **benign canary marker**; no harmful target is ever se
 > are all **DEFERRED-NO-GPU** — implemented in code and tested against tiny/offline
 > seams, but not executed at scale here. The repro stamp still records
 > `version 0.3.0` until the release is cut. Judge-in-the-loop attacks
-> (REINFORCE-GCG, UJA) are v0.5.
+> (REINFORCE-GCG, UJA) landed in v0.5 — see above.
 
 ---
 

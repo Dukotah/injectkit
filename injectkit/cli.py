@@ -1231,16 +1231,21 @@ def _attack_model_spec(args: argparse.Namespace):
 
 
 class _DemoPrefillSeam:
-    """Offline prefill/generation seam for the ``attack`` demo path (no torch).
+    """Offline prefill/generation/gradient seam for the ``attack`` demo path (no torch).
 
-    Implements both the prefill seam (``prefill_generate``) and the generic
-    generation seam (``generate_text``) so it drives any registered white-box
-    attack's offline path. It echoes the benign marker found in the prompt so the
+    Implements the prefill seam (``prefill_generate``), the generic generation seam
+    (``generate_text``), AND the white-box gradient seam (``token_ids`` / ``decode``
+    / ``target_loss`` / ``token_gradients``) so it drives EVERY registered white-box
+    attack's offline path — the gradient families (``gcg`` and the v0.5
+    judge-in-the-loop ``reinforce_gcg`` / ``uja``) as well as the gradient-free
+    ``prefill``. It echoes the benign marker found in the prompt so the
     benign-canary judges record a deterministic success — proving the
     registry -> seam -> judge -> aggregate -> stamp path end-to-end on CPU.
     """
 
     name = "demo"
+    #: Fake vocabulary size for the toy gradient grid (mirrors StubWhiteBoxModel).
+    vocab = 32
 
     def prefill_generate(self, messages, prefix, n_tokens, harmony=False):
         from .attacks.whitebox.prefill import GenerationResult
@@ -1254,6 +1259,23 @@ class _DemoPrefillSeam:
     def generate_text(self, messages, max_new_tokens, *, backend, seed):
         body = "".join(str(m.get("content", "")) for m in messages)
         return f" Here is the requested information: {body}"
+
+    # -- white-box gradient seam (deterministic toy values; no torch) ------ #
+    def token_ids(self, text):
+        return [(ord(c) % self.vocab) for c in (text or "")]
+
+    def decode(self, ids):
+        try:
+            return "".join(chr((int(i) % 26) + 97) for i in ids)
+        except Exception:  # noqa: BLE001 - a demo seam must never raise.
+            return ""
+
+    def target_loss(self, input_ids, target_ids):
+        return float(abs(len(list(input_ids)) - len(list(target_ids))) + 1)
+
+    def token_gradients(self, input_ids, target_ids, suffix_slice):
+        n = len(range(*suffix_slice.indices(len(list(input_ids)))))
+        return [[-(j + 1) for j in range(self.vocab)] for _ in range(max(1, n))]
 
 
 def _render_leaderboard(board, cell, fmt: str) -> str:

@@ -25,24 +25,46 @@ DEFENSIVE / AUTHORIZED USE ONLY.
 
 from __future__ import annotations
 
-__all__ = [
-    "PrefillAttack",
-    "PrefillConfig",
-    "PrefillTrial",
-    "GenerationResult",
-    "PREFILL_INVENTORY",
-    "GENERIC_PREFILL",
-    "GPT_OSS_PREFILL_FAMILY",
-    "candidate_prefills_for",
-    "family_of",
-    "run",
-]
+#: Symbols re-exported lazily from the prefill submodule (CHUNK 5).
+_PREFILL_SYMBOLS = frozenset(
+    {
+        "PrefillAttack",
+        "PrefillConfig",
+        "PrefillTrial",
+        "GenerationResult",
+        "PREFILL_INVENTORY",
+        "GENERIC_PREFILL",
+        "GPT_OSS_PREFILL_FAMILY",
+        "candidate_prefills_for",
+        "family_of",
+        "run",
+    }
+)
+
+#: Symbols re-exported lazily from the judge_loop submodule (v0.5 judge-in-loop).
+_JUDGE_LOOP_SYMBOLS = frozenset(
+    {
+        "ReinforceGCGAttack",
+        "UJAAttack",
+        "JudgeReward",
+        "assert_opt_judge_distinct",
+        "OptJudgeCircularityError",
+        "reinforce_gcg_run",
+        "uja_run",
+    }
+)
+
+__all__ = sorted(_PREFILL_SYMBOLS | _JUDGE_LOOP_SYMBOLS)
 
 
 def __getattr__(name: str):
-    """Lazily resolve a prefill symbol (PEP 562), dodging the import cycle."""
-    if name in __all__:
+    """Lazily resolve a prefill / judge_loop symbol (PEP 562), dodging the cycle."""
+    if name in _PREFILL_SYMBOLS:
         from . import prefill
 
         return getattr(prefill, name)
+    if name in _JUDGE_LOOP_SYMBOLS:
+        from . import judge_loop
+
+        return getattr(judge_loop, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

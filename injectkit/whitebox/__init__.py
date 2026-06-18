@@ -16,7 +16,13 @@ DEFENSIVE / AUTHORIZED USE ONLY.
 from __future__ import annotations
 
 from .base import ArchitectureError, Attack, AttackResult
-from .config import AttackConfig, GCGConfig, PrefillConfig
+from .config import (
+    AttackConfig,
+    GCGConfig,
+    PrefillConfig,
+    ReinforceGCGConfig,
+    UJAConfig,
+)
 from .registry import (
     AttackRegistry,
     get_attack,
@@ -55,10 +61,26 @@ from .gcg import GCGAttack
 # keeps both import orders (whitebox-first and prefill-first) green.
 from ..attacks.whitebox import prefill as _prefill  # noqa: E402,F401  (registration)
 
+# Wire the v0.5 judge-in-the-loop attacks ("reinforce_gcg", "uja"). Same circular-
+# import care as prefill: import the submodule purely for its @register side effect
+# and expose the classes LAZILY (PEP 562) once it has finished initialising.
+from ..attacks.whitebox import judge_loop as _judge_loop  # noqa: E402,F401  (registration)
+
+
+#: v0.5 judge-in-the-loop symbols exposed lazily from the judge_loop submodule.
+_JUDGE_LOOP_EXPORTS = {
+    "ReinforceGCGAttack",
+    "UJAAttack",
+    "assert_opt_judge_distinct",
+    "OptJudgeCircularityError",
+}
+
 
 def __getattr__(name: str):  # PEP 562 — lazy re-export to dodge the import cycle.
     if name == "PrefillAttack":
         return _prefill.PrefillAttack
+    if name in _JUDGE_LOOP_EXPORTS:
+        return getattr(_judge_loop, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 from .gcg_hard import (
     AttackBuffer,
@@ -87,6 +109,8 @@ __all__ = [
     "AttackConfig",
     "GCGConfig",
     "PrefillConfig",
+    "ReinforceGCGConfig",
+    "UJAConfig",
     "AttackRegistry",
     "registry",
     "register",
@@ -96,6 +120,11 @@ __all__ = [
     "GCGAttack",
     # Prefill attack (CHUNK 5-prefill-attack; arXiv:2602.14689).
     "PrefillAttack",
+    # Judge-in-the-loop attacks (v0.5; arXiv:2502.17924 + 2307.15043).
+    "ReinforceGCGAttack",
+    "UJAAttack",
+    "assert_opt_judge_distinct",
+    "OptJudgeCircularityError",
     # nanoGCG-parity hardening (CHUNK 3-gcg-advprefix).
     "PromptSlices",
     "locate_optim_slice",

@@ -116,6 +116,49 @@ model** with no model load (verified in `tests/test_whitebox_gcg_hard.py`).
 
 ---
 
+## 5b. Judge-in-the-loop attacks (v0.5) — REINFORCE-GCG & UJA
+
+v0.5 adds two **judge-in-the-loop** white-box attacks built on the *same* hardened
+GCG machinery above (`gcg_hard.py` + the reused `GCGSuffixAttacker._optimize_suffix`
+inner loop — no duplicated optimiser), closing the loop with the offline judge layer:
+
+- **REINFORCE-GCG** (Geisler et al., arXiv:2502.17924) — the per-candidate objective
+  becomes `nll - reward_weight · reward`, where the reward is the **in-loop judge's**
+  StrongREJECT-style score of the model's *own generated continuation* (the
+  distributional/semantic objective), not the teacher-forced target NLL alone.
+- **UJA** (Universal Jailbreak Adversarial; universal-suffix GCG, arXiv:2307.15043
+  §universal, + an in-loop judge reward) — one **universal** suffix optimised across a
+  *set* of behaviors, scored by the **mean** in-loop reward across the batch.
+
+**Circularity firewall (ROADMAP §6.10.1; arXiv:2502.11910).** The in-loop
+**optimisation** judge must differ from the leaderboard **evaluation** judge. Both
+configs default `opt_judge_id = "substring"` (bundled, cheap, never the `clean_cls`
+eval judge); `assert_opt_judge_distinct` raises `OptJudgeCircularityError` if they
+coincide. `tests/test_whitebox_judge_loop.py` asserts this for both attacks.
+
+**Golden-loss tripwire extension.** At `reward_weight = 0` the REINFORCE combined
+objective collapses **exactly** to the GCG target NLL the §2 golden values are pinned
+against — so the v0.5 optimisers inherit the same 5%-rel tripwire (verified offline in
+`test_combined_loss_reduces_to_nll_at_zero_reward_weight`, and on a real tiny model via
+the existing `tests/test_whitebox_golden_loss.py` NLL path the reward augments).
+
+| Check | Runs on this host? |
+|-------|--------------------|
+| REINFORCE-GCG / UJA contract, registry, dense-only gate (offline seams) | ✅ yes (no torch) |
+| In-loop judge reward over the offline `generate_text` seam | ✅ yes (mock judge) |
+| Circularity firewall `opt_judge_id != eval_judge_id` | ✅ yes (offline) |
+| Combined-loss = NLL at `reward_weight=0` (golden-loss tie-in) | ✅ yes (offline) |
+| Real 7–20B + a real judge as the reward signal | ❌ DEFERRED-NO-GPU |
+| Full REINFORCE distributional estimate (many sampled continuations) | ❌ DEFERRED-NO-GPU |
+| Universal-transfer ASR across a large held-out behavior set | ❌ DEFERRED-NO-GPU |
+
+The deferred rows are **implemented in code** and exercised against the tiny/offline
+seams (the GCG inner loop, the `generate` runner seam, the bundled mock judge); they
+are not faked. The honest frontier-robustness caveat (README §"Honest frontier
+caveat") stands: a judge-in-the-loop attacker measures robustness, it does not
+"jailbreak anything", and classifier-equipped frontier stacks remain hard.
+
+
 ## 6. Honesty ledger (what is and isn't run here)
 
 | Check | Runs on this host? |

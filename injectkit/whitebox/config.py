@@ -37,6 +37,8 @@ __all__ = [
     "AttackConfig",
     "GCGConfig",
     "PrefillConfig",
+    "ReinforceGCGConfig",
+    "UJAConfig",
 ]
 
 
@@ -128,6 +130,86 @@ class GCGConfig(AttackConfig):
             trigger=self.trigger,
             seed=self.seed,
         )
+
+
+#: The default in-loop OPTIMISATION judge id (ROADMAP §6.10.1 circularity
+#: firewall). It MUST differ from the EVAL judge the leaderboard scores with, both
+#: to avoid the optimiser gaming its own grader (arXiv:2502.11910) and to fit the
+#: 24 GB VRAM budget. The substring matcher is bundled, fast, never the eval judge,
+#: and a safe in-loop default for the offline test path. Mirrors
+#: ``injectkit.judge.DEFAULT_OPT_JUDGE`` (re-declared here so the config module
+#: stays free of a judge-layer import at load time).
+DEFAULT_OPT_JUDGE_ID = "substring"
+
+
+class ReinforceGCGConfig(GCGConfig):
+    """Typed config for REINFORCE-GCG (judge-in-the-loop GCG; arXiv:2502.17924).
+
+    REINFORCE-GCG (Geisler et al., *"REINFORCE Adversarial Attacks on Large
+    Language Models: An Adaptive, Distributional, and Semantic Objective"*,
+    arXiv:2502.17924) replaces GCG's single teacher-forced target-NLL objective
+    with a **REINFORCE reward** estimated by sampling the model's own
+    continuations and scoring them with an in-loop judge. The gradient signal that
+    selects candidate token swaps is then ``loss = nll - reward_weight * reward``,
+    so candidates that actually *make the model emit the benign marker* (as judged)
+    are preferred over candidates that merely lower the teacher-forced NLL of a
+    fixed prefix — the distributional/semantic objective the paper introduces.
+
+    Inherits every GCG knob (``suffix_len``/``top_k``/``search_width``/...) and
+    adds the REINFORCE-specific ones. The in-loop ``opt_judge_id`` defaults to a
+    judge DISTINCT from the leaderboard EVAL judge (``clean_cls``), preserving the
+    §6.10.1 circularity firewall (a later test asserts ``opt_judge_id !=
+    eval_judge_id``).
+
+    ETHICS: the reward judges the BENIGN-canary proxy — "reward" means the model
+    emitted the per-run marker it was told to withhold, never harmful content.
+    """
+
+    #: Registry id of the in-loop OPTIMISATION judge whose reward steers candidate
+    #: selection. MUST differ from the EVAL judge (§6.10.1). Bundled + offline.
+    opt_judge_id: str = DEFAULT_OPT_JUDGE_ID
+    #: Weight λ on the judge reward in the combined objective
+    #: ``nll - reward_weight * reward``. 0 ⇒ plain GCG (reward ignored); larger ⇒
+    #: the semantic judge signal dominates the teacher-forced NLL.
+    reward_weight: float = Field(default=1.0, ge=0.0)
+    #: Number of continuations sampled per candidate to estimate the REINFORCE
+    #: reward (the paper's distributional objective averages over samples). 1 keeps
+    #: the offline path cheap; real runs raise it.
+    num_samples: int = Field(default=4, ge=1)
+    #: Greedy/sampled continuation length (tokens) the in-loop judge scores.
+    judge_n_tokens: int = Field(default=64, ge=1)
+
+
+class UJAConfig(GCGConfig):
+    """Typed config for UJA — Universal Jailbreak Adversarial (judge-in-the-loop).
+
+    UJA optimises ONE *universal* adversarial suffix that transfers across a SET of
+    behaviors at once (the universal/transferable GCG objective; Zou et al.,
+    arXiv:2307.15043 §"Universal", extended with an in-loop judge reward as in the
+    universal-jailbreak-adversarial line of work). Each optimisation step scores
+    candidate swaps by the **mean** in-loop judge reward across the behavior batch,
+    so the surviving suffix is the one that drives the benign marker on the *most*
+    behaviors — a single suffix, many prompts.
+
+    Inherits the GCG knobs and adds the universal-batch + in-loop-judge knobs. The
+    behaviors themselves are passed at ``run`` time (in ``messages`` / a behavior
+    set), not on the config. The in-loop ``opt_judge_id`` again defaults DISTINCT
+    from the EVAL judge (§6.10.1).
+
+    ETHICS: every behavior is a BENIGN-canary robustness probe; the universal suffix
+    is optimised to elicit the per-run marker across them, never harmful content.
+    """
+
+    #: Registry id of the in-loop OPTIMISATION judge whose mean reward across the
+    #: behavior batch steers candidate selection. MUST differ from the EVAL judge.
+    opt_judge_id: str = DEFAULT_OPT_JUDGE_ID
+    #: Weight λ on the judge reward in the combined universal objective.
+    reward_weight: float = Field(default=1.0, ge=0.0)
+    #: Max number of behaviors averaged per step (the universal batch). Caps the
+    #: per-step cost; the suffix is still scored on all behaviors for the result.
+    behaviors_per_step: int = Field(default=4, ge=1)
+    #: Greedy continuation length (tokens) the in-loop judge scores per behavior.
+    judge_n_tokens: int = Field(default=64, ge=1)
 
 
 class PrefillConfig(AttackConfig):

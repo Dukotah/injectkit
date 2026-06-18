@@ -5,6 +5,52 @@ All notable changes to **injectkit** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.5 judge-in-the-loop attackers
+
+**Judge-in-the-loop white-box attackers** on the v0.4 ABC/registry: the offline judge
+layer becomes the **in-loop reward signal** that steers token optimisation, not just a
+post-hoc grader. **Library-complete and CPU-tested offline** against tiny / offline
+seams + the deterministic mock judge; the at-scale run (real 7–20B + a real judge
+reward) is **DEFERRED-NO-GPU** — code path exists and is exercised, not faked. Every
+objective remains the **benign canary marker**; no harmful target is set, sampled, or
+rewarded. Still offline-first and **defensive / authorized-use only**.
+
+### Added
+
+- **REINFORCE-GCG** (`reinforce_gcg`, `injectkit/attacks/whitebox/judge_loop.py`) —
+  judge-in-the-loop GCG. The per-candidate objective becomes `nll − reward_weight ·
+  reward`, where the reward is the in-loop judge's StrongREJECT-style score of the
+  model's *own generated continuation* (the adaptive/distributional/semantic
+  objective). At `reward_weight = 0` it reduces exactly to plain GCG (the golden-loss
+  tie-in). **Reuses** the hardened `gcg_hard.py` machinery + the proven GCG inner loop
+  — no duplicated optimiser. Grounded in REINFORCE-GCG (arXiv:2502.17924).
+- **UJA — Universal Jailbreak Adversarial** (`uja`, same module) — optimises one
+  **universal** suffix across a *set* of benign-canary behaviors, re-ranked by the
+  **mean** in-loop judge reward across the batch; success requires transfer to a
+  majority of behaviors. Grounded in the universal/transferable GCG objective
+  (arXiv:2307.15043 §universal).
+- **Optimisation-judge ≠ evaluation-judge circularity firewall**
+  (`assert_opt_judge_distinct` / `OptJudgeCircularityError`) — the in-loop OPT judge
+  (`substring`) must differ from the leaderboard EVAL judge (`clean_cls`) so the
+  optimiser cannot game its own grader. Grounded in the judge-circularity finding
+  (arXiv:2502.11910). See `docs/JUDGES.md` §6.
+- **Typed configs** `ReinforceGCGConfig` / `UJAConfig` (extend `GCGConfig`) with the
+  REINFORCE/universal knobs (`opt_judge_id`, `reward_weight`, `num_samples` /
+  `behaviors_per_step`, `judge_n_tokens`).
+- **Registry + CLI + bench surface** — both attacks register on the white-box attack
+  registry and run through `injectkit attack` / `injectkit capability`
+  (`--attack reinforce_gcg` / `--attack uja`) and the bench harness, fully offline on
+  the demo seam (the demo seam now also exposes the gradient seam). Dense-only
+  (gradient family); the zoo's dense models list them under `supported_attacks`.
+
+### DEFERRED-NO-GPU
+
+- Real 7–20B model + a real judge as the reward signal; the full sampled REINFORCE
+  distributional estimate; universal-transfer ASR over a large held-out behavior set.
+  Implemented in code and exercised against tiny/offline seams + the deterministic mock
+  judge — not executed at scale on this no-GPU host. The honest frontier-robustness
+  caveat is preserved (`docs/RESEARCH.md`, `docs/REPRODUCE.md` §5b).
+
 ## [Unreleased] — v0.4 white-box core integration
 
 The **white-box research core**: a license-clean, fully-offline white-box attack +

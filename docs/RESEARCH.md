@@ -80,6 +80,41 @@ benign-canary methodology (success = the harmless marker is emitted).
 | Named attackers: `gptfuzzer` | `attackers/registry.py` | GPTFUZZER 2309.10253 |
 | White-box `gcg` (HF-only, benign target) | `attackers/whitebox_base.py` | GCG / AmpleGCG 2404.07921; Mask-GCG 2509.06350 |
 
+## v0.5 — judge-in-the-loop attackers (every add cites a source)
+
+v0.5 adds two **white-box judge-in-the-loop** attackers on the existing ABC/registry,
+both targeting the benign canary marker and both using the **offline judge layer** as
+the in-loop reward signal. They reuse the hardened GCG machinery (`gcg_hard.py` + the
+shared inner loop) rather than re-implementing it.
+
+| v0.5 addition | Module (contract) | Cited source |
+|---------------|-------------------|--------------|
+| `reinforce_gcg` (judge-reward-steered GCG) | `attacks/whitebox/judge_loop.py` (`ReinforceGCGAttack`) | REINFORCE-GCG, arXiv:2502.17924 |
+| `uja` (universal jailbreak adversarial suffix) | `attacks/whitebox/judge_loop.py` (`UJAAttack`) | universal GCG, arXiv:2307.15043 §universal |
+| Optimisation-judge ≠ evaluation-judge firewall | `attacks/whitebox/judge_loop.py` (`assert_opt_judge_distinct`) | judge-circularity, arXiv:2502.11910 |
+
+- **REINFORCE-GCG** (arXiv:2502.17924) replaces GCG's single teacher-forced target-NLL
+  with a REINFORCE reward estimated by sampling the model's own continuations and
+  scoring them with an in-loop judge — an *adaptive, distributional, semantic*
+  objective. injectkit's combined objective is `nll − reward_weight · reward`, the
+  reward being the in-loop judge's StrongREJECT-style score of the benign-marker
+  continuation. With `reward_weight = 0` it reduces exactly to plain GCG (the
+  golden-loss tie-in).
+- **UJA** optimises one *universal* suffix across a set of behaviors at once (the
+  universal/transferable GCG objective, arXiv:2307.15043), re-ranked by the **mean**
+  in-loop judge reward across the batch; "success" requires transfer to a majority of
+  behaviors.
+- The **circularity firewall** (arXiv:2502.11910) keeps the in-loop optimisation judge
+  distinct from the leaderboard evaluation judge, so the optimiser cannot game its own
+  grader. Defaults wire `opt_judge = substring`, `eval_judge = clean_cls`.
+
+> ⚠️ **Honest frontier caveat (unchanged for v0.5).** A judge-in-the-loop attacker is
+> a *measurement* tool — including proving a model is robust — not "jailbreak
+> anything". The at-scale run (real 7–20B + a real judge as the reward signal, the
+> full distributional REINFORCE estimate, and universal-transfer ASR) is
+> **DEFERRED-NO-GPU**: implemented and exercised against tiny/offline seams + the
+> deterministic mock judge, not faked. See [REPRODUCE.md](./REPRODUCE.md) §5b.
+
 ### The 5-class framework ↔ benign-canary mapping
 
 `evaluators/response_class.py::ResponseClass` grades each reply into five classes
@@ -118,4 +153,5 @@ survey 2407.04295 · Crescendo 2404.01833 · MSJ (NeurIPS'24, Anthropic) ·
 CipherChat 2308.06463 · ArtPrompt 2402.11753 · Low-resource 2310.02446 /
 MultiJail 2310.06474 · PAIR 2310.08419 · TAP 2312.02119 · AutoDAN 2310.04451 ·
 GPTFUZZER 2309.10253 · AmpleGCG 2404.07921 · Mask-GCG 2509.06350 ·
-JailbreakBench (github) · OWASP LLM Top-10 2025 · scaling-robustness 2407.18213.
+JailbreakBench (github) · OWASP LLM Top-10 2025 · scaling-robustness 2407.18213 ·
+REINFORCE-GCG 2502.17924 · GCG/universal 2307.15043 · judge-circularity 2502.11910.

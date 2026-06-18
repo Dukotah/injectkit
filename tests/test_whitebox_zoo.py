@@ -262,7 +262,9 @@ def test_load_by_revision_returns_four_tuple_and_pins_revision(patched_hf):
     assert isinstance(model, _FakeModel)
     assert isinstance(tok, _FakeTok)
     assert arch == "dense"
-    assert attacks == ("gcg",)
+    # Dense models support the GCG family + the v0.5 judge-in-the-loop variants
+    # (all gradient, dense-only); the zoo sorts the supported_attacks list.
+    assert attacks == ("gcg", "reinforce_gcg", "uja")
     repo, kw = _FakeModel.last
     assert repo == "Qwen/Qwen2.5-7B-Instruct"
     assert kw["revision"] == zoo.get_entry("qwen2.5-7b").revision
