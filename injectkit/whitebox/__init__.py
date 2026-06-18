@@ -70,6 +70,13 @@ from .gcg_hard import (
     sample_candidates,
     token_gradients_onehot,
 )
+from .probe_sampling import (
+    PAPER_ASR,
+    PAPER_SPEEDUP,
+    ProbeSampling,
+    ProbeSamplingResult,
+    resolve_probe_sampling,
+)
 from .targets import (
     FIXED_BASELINE_PREFIX,
     PrefixCandidate,
@@ -105,6 +112,12 @@ __all__ = [
     "sample_candidates",
     "AttackBuffer",
     "ProbeSamplingConfig",
+    # Probe Sampling efficiency primitive (CHUNK 8-probe-sampling; arXiv:2403.01251).
+    "ProbeSampling",
+    "ProbeSamplingResult",
+    "resolve_probe_sampling",
+    "PAPER_SPEEDUP",
+    "PAPER_ASR",
     # AdvPrefix target source (CHUNK 3-gcg-advprefix).
     "advprefix_target",
     "candidate_prefixes_for",

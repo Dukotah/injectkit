@@ -93,14 +93,27 @@ Both are enforced by `tests/test_whitebox_gcg_hard.py` with no GPU and no weight
 
 ---
 
-## 4. probe_sampling — DEFERRED-NO-GPU
+## 4. Probe Sampling — implemented; speedup NUMBER DEFERRED-NO-GPU
 
-`probe_sampling` (nanoGCG / arXiv:2410.15362) uses a cheap **draft model** to
-pre-filter the `search_width` candidate batch before scoring with the target
-model. injectkit carries the knob (`ProbeSamplingConfig`, `GCGConfig.probe_sampling`)
-and records it in the reproducibility stamp, but the draft-model filtering loop is
-a GPU deliverable and is **off by default**. With it off, the optimiser scores the
-full batch exactly as plain GCG (no behavior change). Marked DEFERRED-NO-GPU.
+Probe Sampling (**arXiv:2403.01251**, NeurIPS 2024) uses a cheap **draft model**
+to score the whole `search_width` candidate batch, re-scores only the top fraction
+`r` on the expensive **target model**, and sizes the kept fraction dynamically by
+draft↔target agreement. As of CHUNK 8 the **full code path is implemented**
+(`injectkit/whitebox/probe_sampling.py` → `ProbeSampling.select`; opt-in via
+`GCGConfig.probe_sampling=(r, sampling_factor)`; wired into `GCGAttack.run` and the
+GCG inner loop's `_probe_sampling_step`). The draft-vs-target re-scoring logic is
+**verified on the tiny CPU path** (two scripted / `StubWhiteBoxModel` seams as
+draft+target, plus an `importorskip`-gated two-tiny-GPT-2 path) in
+`tests/test_whitebox_probe_sampling.py`: it finds the global target minimum while
+issuing strictly fewer target forward passes than the full batch, and widens the
+kept fraction when the draft disagrees.
+
+Paper parity NUMBER (recorded in `PAPER_SPEEDUP` / `PAPER_ASR`): **3.5×–6.3×
+wall-clock speedup**, **ASR 81.0 vs 69.0 on Llama-2-7B-chat**. The ≥3× wall-clock
+speedup + non-degraded-ASR measurement on a real 7-8B target needs a GPU, so the
+**number** is **DEFERRED-NO-GPU** — the path runs, the headline figure is not timed
+here. With `probe_sampling` off (default) the optimiser scores the full batch
+exactly as plain GCG (no behaviour change).
 
 ---
 
@@ -126,7 +139,8 @@ model** with no model load (verified in `tests/test_whitebox_gcg_hard.py`).
 | One-hot gradient + golden-loss within 5% rel (GPT-2 / Pythia-160M) | ✅ yes (CPU, tiny model) |
 | Load Llama-3.1-8B fp16+4bit on a 24 GB GPU | ❌ DEFERRED-NO-GPU |
 | Full 8B ASR parity (±10 abs pp) vs reference GCG | ❌ DEFERRED-NO-GPU |
-| probe_sampling draft-model loop | ❌ DEFERRED-NO-GPU (knob present, off) |
+| Probe Sampling draft→target re-scoring logic | ✅ yes (CPU, tiny seams + tiny-GPT-2 importorskip) |
+| Probe Sampling ≥3× wall-clock speedup + ASR on 8B | ❌ DEFERRED-NO-GPU (code path complete, number not timed) |
 | AdvPrefix full-scale 8B prefix mining | ❌ DEFERRED-NO-GPU (algorithm tested on CPU) |
 
 The deferred rows are **implemented in code** (the full path exists and is

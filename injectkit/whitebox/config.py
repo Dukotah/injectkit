@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..evaluators.heuristics import DEFAULT_TRIGGER
 
@@ -95,9 +95,15 @@ class GCGConfig(AttackConfig):
     #: ``encode(decode(ids)) == ids`` (the filter_ids correctness trap). Keep True
     #: for correctness; exposed only so the trap itself can be tested both ways.
     filter_nonascii: bool = True
-    #: nanoGCG ``probe_sampling`` toggle (draft-model candidate pre-filtering).
-    #: Off by default; the draft-model loop is a GPU deliverable (DEFERRED-NO-GPU).
-    probe_sampling: bool = False
+    #: Probe Sampling (arXiv:2403.01251, NeurIPS 2024) opt-in — draft-model
+    #: candidate pre-filtering for any GCG variant. ``None``/``False`` (default) ⇒
+    #: off (full-batch target scoring, identical to plain GCG). ``True`` ⇒ paper
+    #: defaults. A ``(r, sampling_factor)`` tuple ⇒ enabled with ``r`` the minimum
+    #: fraction re-scored on the TARGET (0<r<=1) and ``sampling_factor`` the
+    #: draft↔target agreement probe-set size. Validated via
+    #: :func:`injectkit.whitebox.probe_sampling.resolve_probe_sampling`. The real
+    #: >=3x speedup measurement is DEFERRED-NO-GPU; the code path is complete.
+    probe_sampling: bool | tuple[float, int] | None = False
     #: When True (default), GCG's target prefix is the model-specific AdvPrefix
     #: (arXiv:2412.10321); when False, the documented fixed "Sure, here is"
     #: baseline. See :func:`injectkit.whitebox.targets.advprefix_target`.
@@ -106,6 +112,23 @@ class GCGConfig(AttackConfig):
     #: attacker's default benign filler. May be seeded from a research-gated
     #: AmpleGCG artifact, but the objective is re-pointed at the benign marker.
     init_suffix: str | None = None
+
+    @field_validator("probe_sampling")
+    @classmethod
+    def _validate_probe_sampling(cls, value: Any) -> Any:
+        """Validate the probe-sampling knob at construction (reject bad tuples).
+
+        Accepts ``None``/``bool`` or a ``(r, sampling_factor)`` tuple; a malformed
+        tuple (wrong arity, ``r`` outside ``(0, 1]``, ``sampling_factor < 1``)
+        raises here so the bad config never reaches the optimiser. The value is
+        returned unchanged on success — the resolved view is produced lazily by
+        :func:`injectkit.whitebox.probe_sampling.resolve_probe_sampling` at run
+        time (kept out of this module to avoid an import cycle).
+        """
+        from .probe_sampling import resolve_probe_sampling
+
+        resolve_probe_sampling(value)  # raises ValueError on a malformed tuple
+        return value
 
     def to_legacy(self) -> Any:
         """Project onto the v0.3 :class:`GCGConfig` dataclass the optimiser reads.

@@ -147,6 +147,37 @@ class GCGSuffixAttacker(WhiteBoxGCGAttacker):
         )
         # Deterministic RNG for reproducible candidate sampling (GCG seed).
         self._rng = random.Random(self.config.seed)
+        # Optional Probe Sampling acceleration (arXiv:2403.01251). When attached
+        # via :meth:`attach_probe_sampling`, the per-step batch is draft-filtered
+        # before target scoring; otherwise the proven full-target path runs as-is.
+        self._probe_draft: Optional[WhiteBoxModel] = None
+        self._probe_r: float = 0.1
+        self._probe_sampling_factor: int = 8
+
+    def attach_probe_sampling(
+        self,
+        draft: WhiteBoxModel,
+        *,
+        r: float = 0.1,
+        sampling_factor: int = 8,
+    ) -> None:
+        """Enable Probe Sampling (arXiv:2403.01251) with a cheap DRAFT model seam.
+
+        When attached, :meth:`_optimize_suffix` routes each step's candidate batch
+        through :class:`injectkit.whitebox.probe_sampling.ProbeSampling`: the draft
+        scores the whole batch cheaply, only the top fraction ``r`` (dynamically
+        widened by draft↔target disagreement) is re-scored on the TARGET model, and
+        the lowest-target-loss candidate is kept. The objective is unchanged (the
+        benign marker); only *which candidates get a target forward pass* changes.
+
+        Args:
+            draft: The cheap draft :class:`WhiteBoxModel` seam (small model).
+            r: Minimum fraction of the per-step batch re-scored on the target.
+            sampling_factor: Draft↔target agreement probe-set size.
+        """
+        self._probe_draft = draft
+        self._probe_r = float(r)
+        self._probe_sampling_factor = int(sampling_factor)
 
     # ------------------------------------------------------------------ public
 
@@ -295,25 +326,18 @@ class GCGSuffixAttacker(WhiteBoxGCGAttacker):
             # 1. White-box gradient of the benign target loss w.r.t. the suffix.
             grads = self.model.token_gradients(input_ids, target_ids, suffix_slice)
 
-            # 2+3. For each slot, draw top-k candidates and evaluate a batch of
-            #      single-token swaps; keep the lowest-loss swap (greedy).
-            best_ids = list(suffix_ids)
-            best_loss = float(self.model.target_loss(input_ids, target_ids))
-            for slot in range(len(suffix_ids)):
-                candidates = self._top_k_candidates(grads, slot)
-                if not candidates:
-                    continue
-                sampled = self._sample_candidates(candidates)
-                for token_id in sampled:
-                    if token_id == suffix_ids[slot]:
-                        continue
-                    trial = list(best_ids)
-                    trial[slot] = token_id
-                    trial_input = list(prompt_ids) + trial
-                    loss = float(self.model.target_loss(trial_input, target_ids))
-                    if loss < best_loss:
-                        best_loss = loss
-                        best_ids = trial
+            # 2+3. Score candidate single-token swaps and keep the lowest-loss one.
+            #      With Probe Sampling attached, draft-filter the batch before the
+            #      (expensive) target scoring; otherwise run the proven per-slot
+            #      greedy path verbatim.
+            if self._probe_draft is not None:
+                best_ids, best_loss = self._probe_sampling_step(
+                    prompt_ids, target_ids, suffix_ids, grads
+                )
+            else:
+                best_ids, best_loss = self._greedy_step(
+                    prompt_ids, target_ids, suffix_ids, input_ids, grads
+                )
             suffix_ids = best_ids
 
             suffix_text = self.model.decode(suffix_ids)
@@ -331,6 +355,96 @@ class GCGSuffixAttacker(WhiteBoxGCGAttacker):
         return steps
 
     # ----------------------------------------------------------------- helpers
+
+    def _greedy_step(
+        self,
+        prompt_ids: Any,
+        target_ids: Any,
+        suffix_ids: list[int],
+        input_ids: list[int],
+        grads: Any,
+    ) -> tuple[list[int], float]:
+        """The proven per-slot greedy coordinate step (no probe sampling).
+
+        For each suffix slot, draw the top-k gradient candidates, sample a batch of
+        single-token swaps, and keep the lowest-target-loss swap. Returns the best
+        suffix ids and their target loss. Behaviour is byte-for-byte identical to
+        the original inline loop (extracted only so probe sampling can branch).
+        """
+        best_ids = list(suffix_ids)
+        best_loss = float(self.model.target_loss(input_ids, target_ids))
+        for slot in range(len(suffix_ids)):
+            candidates = self._top_k_candidates(grads, slot)
+            if not candidates:
+                continue
+            sampled = self._sample_candidates(candidates)
+            for token_id in sampled:
+                if token_id == suffix_ids[slot]:
+                    continue
+                trial = list(best_ids)
+                trial[slot] = token_id
+                trial_input = list(prompt_ids) + trial
+                loss = float(self.model.target_loss(trial_input, target_ids))
+                if loss < best_loss:
+                    best_loss = loss
+                    best_ids = trial
+        return best_ids, best_loss
+
+    def _probe_sampling_step(
+        self,
+        prompt_ids: Any,
+        target_ids: Any,
+        suffix_ids: list[int],
+        grads: Any,
+    ) -> tuple[list[int], float]:
+        """One GCG step accelerated by Probe Sampling (arXiv:2403.01251).
+
+        Builds this step's full single-token-swap candidate batch (the incumbent
+        suffix plus, for every slot, the sampled top-k swaps), then delegates the
+        expensive scoring to
+        :class:`injectkit.whitebox.probe_sampling.ProbeSampling`: the cheap DRAFT
+        model scores the whole batch, only the top fraction ``r`` (widened
+        dynamically by draft↔target disagreement) is re-scored on the TARGET model,
+        and the lowest-target-loss candidate wins. Falls back to the greedy step if
+        no candidate batch could be formed.
+
+        Returns the winning suffix ids and their TARGET loss — the same decision
+        the greedy path would reach when the draft is a faithful proxy, but with
+        far fewer target forward passes.
+        """
+        # Lazy import keeps gcg.py free of the probe_sampling dependency at load.
+        from ..whitebox.probe_sampling import ProbeSampling
+
+        incumbent_input = list(prompt_ids) + list(suffix_ids)
+        # Candidate batch: the incumbent itself plus every sampled single-token swap.
+        batch: list[list[int]] = [list(suffix_ids)]
+        for slot in range(len(suffix_ids)):
+            candidates = self._top_k_candidates(grads, slot)
+            if not candidates:
+                continue
+            for token_id in self._sample_candidates(candidates):
+                if token_id == suffix_ids[slot]:
+                    continue
+                trial = list(suffix_ids)
+                trial[slot] = token_id
+                batch.append(trial)
+
+        if len(batch) <= 1:
+            # No swaps to consider: keep the incumbent at its true target loss.
+            return list(suffix_ids), float(
+                self.model.target_loss(incumbent_input, target_ids)
+            )
+
+        sampler = ProbeSampling(
+            self._probe_draft,
+            self.model,
+            r=self._probe_r,
+            sampling_factor=self._probe_sampling_factor,
+            prompt_ids=prompt_ids,
+            target_ids=target_ids,
+        )
+        result = sampler.select(batch)
+        return list(batch[result.best_index]), float(result.best_loss)
 
     def _top_k_candidates(self, grads: Any, slot: int) -> list[int]:
         """Return the ``top_k`` most-promising replacement token ids for ``slot``.

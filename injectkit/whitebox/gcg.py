@@ -40,6 +40,13 @@ from .gcg_hard import (
     sample_candidates,
     token_gradients_onehot,
 )
+from .probe_sampling import (
+    PAPER_ASR,
+    PAPER_SPEEDUP,
+    ProbeSampling,
+    ProbeSamplingResult,
+    resolve_probe_sampling,
+)
 from .registry import register
 from .targets import FIXED_BASELINE_PREFIX, advprefix_target
 
@@ -58,6 +65,12 @@ __all__ = [
     # AdvPrefix target source.
     "advprefix_target",
     "FIXED_BASELINE_PREFIX",
+    # Probe Sampling efficiency primitive (chunk 8; arXiv:2403.01251).
+    "ProbeSampling",
+    "ProbeSamplingResult",
+    "resolve_probe_sampling",
+    "PAPER_SPEEDUP",
+    "PAPER_ASR",
 ]
 
 
@@ -138,6 +151,19 @@ class GCGAttack(Attack):
             init_suffix=gcfg.init_suffix,
             name=self.name,
         )
+
+        # Probe Sampling (arXiv:2403.01251) opt-in: when cfg.probe_sampling is set,
+        # attach a cheap DRAFT model so each step draft-filters its candidate batch
+        # before the expensive target scoring. The draft is taken from the model
+        # seam's optional ``draft_model`` attribute (a small zoo model in
+        # production); if absent it degrades to the target model itself (still
+        # exercises the re-scoring logic). The real >=3x speedup is DEFERRED-NO-GPU.
+        ps = resolve_probe_sampling(gcfg.probe_sampling)
+        if ps.enabled:
+            draft = getattr(model, "draft_model", None) or model
+            attacker.attach_probe_sampling(
+                draft, r=ps.r, sampling_factor=ps.sampling_factor
+            )
 
         # Drive the proven inner loop directly through the white-box seam so we
         # capture the optimisation trajectory (the loss curve + best suffix). This
