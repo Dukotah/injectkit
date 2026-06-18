@@ -12,6 +12,11 @@ benchmark into the leaderboard machinery the rest of v0.4 feeds:
 * :mod:`injectkit.bench.leaderboard` — the model × attack matrix. Primary columns
   are the three signals (each with its CI); metadata columns are avg-queries /
   GPU-hours / wall-clock / quant. Exports to CSV + JSON + Markdown.
+* :mod:`injectkit.bench.capability` — the capability-paradox sweep. Runs one attack
+  across a *set* of models ordered along a capability axis and reports the
+  ASR-vs-capability curve (the MCPTox finding that more-capable models can be MORE
+  susceptible to tool poisoning, arXiv:2508.14925). Built on :func:`run_cell`; the
+  frontier-model run is DEFERRED-NO-GPU, the offline-seam path drives the tests.
 * :mod:`injectkit.bench.stamp` — the reproducibility stamp with ALL 8 mandatory
   fields (version, corpus-hash, model-revision, seed, quant, judge-id, attack-id,
   backend); ``quant`` is mandatory and never defaulted.
@@ -27,6 +32,15 @@ DEFENSIVE / AUTHORIZED USE ONLY.
 
 from __future__ import annotations
 
+from .capability import (
+    FLAT,
+    INVERSE,
+    PARADOX,
+    CapabilityCurve,
+    CapabilityPoint,
+    ModelUnderTest,
+    run_capability_sweep,
+)
 from .harness import (
     ASRStat,
     Behavior,
@@ -63,6 +77,14 @@ __all__ = [
     "run_cell",
     "runs_reproduce",
     "wilson_interval",
+    # capability-paradox sweep
+    "CapabilityCurve",
+    "CapabilityPoint",
+    "ModelUnderTest",
+    "run_capability_sweep",
+    "PARADOX",
+    "INVERSE",
+    "FLAT",
     # leaderboard
     "Leaderboard",
     "PRIMARY_COLUMNS",

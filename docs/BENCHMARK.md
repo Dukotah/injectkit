@@ -176,7 +176,66 @@ injectkit bench --target ollama --model llama3.1 --mutate base64 --defense sandw
   `corpus_hash`, seed, target, and judge setting; the metadata stamp makes
   mismatches obvious.
 
-## 6. Offline-first & test posture
+## 6. Capability-paradox sweep (ASR vs model capability)
+
+> Why this matters. MCPTox (arXiv:2508.14925) found that **more-capable models can
+> be *more* susceptible** to tool poisoning — the arms race cannot be won by better
+> models alone. injectkit's `capability` mode measures that curve directly: it runs
+> one attack across a **set of target models** ordered along a configurable
+> **capability axis** and reports ASR-vs-capability with a per-model Wilson CI.
+
+`injectkit capability` (and the library `injectkit.bench.run_capability_sweep`)
+generalises the single-cell harness over a model set:
+
+```sh
+# Offline, zero-setup: sweep one attack across the synthetic demo capability ladder.
+injectkit capability --attack prefill --models demo --seeds 2
+
+# Frontier sweep over the pinned zoo (DEFERRED-NO-GPU — needs a GPU + downloads):
+injectkit capability --attack prefill --models zoo --seeds 5 --export-dir out/
+```
+
+For each model the sweep runs the existing `run_cell` (same attack registry, judge
+layer, generation seam, and the **three never-collapsed signals** — substring-ASR /
+judge-ASR / StrongREJECT-mean, each with a Wilson CI and the full **8-field repro
+stamp**), records the model's **capability score** (an explicit value, else the
+zoo entry's `params_b`), and sorts the points along the capability axis into a
+`CapabilityCurve`. The curve exposes:
+
+- **`series()`** — the ordered `(capability, judge-ASR ± CI)` series the plot/table
+  consumes.
+- **`leaderboard()`** — the model × attack matrix (one column per capability rung),
+  rendered to CSV / JSON / Markdown by the existing exporters, every cell carrying
+  its 8-field stamp.
+- **`verdict()`** — a monotonicity read: `capability_paradox` (ASR rises with
+  capability — the MCPTox finding), `inverse` ("bigger is safer"), or `flat`.
+
+> **Honest caveat (read this).** The verdict is an **indicative** read of a handful
+> of seeded points, **not** a significance test, and the "90%+ even on flagship
+> aligned models" narrative remains overstated (see [`RESEARCH.md`](./RESEARCH.md)).
+> A robust frontier model legitimately scores near zero. The value is *measuring*
+> the curve — including proving the paradox does *not* hold for your stack — not
+> manufacturing it.
+
+### DEFERRED-NO-GPU — the actual frontier run
+
+The offline `--models demo` path is the deterministic CPU done-check (a synthetic
+capability ladder over the offline seam; no torch, no download, no API key) and is
+what the test suite drives. The **actual frontier-model curve** — sweeping the
+pinned zoo entries (`llama-3.1-8b`, `qwen2.5-7b`, `gemma-2-9b`, `mistral-7b-v0.3`,
+`phi-4`, `gpt-oss-20b`) or the live `anthropic` / `ollama` / `openai` targets —
+needs a GPU + multi-GB downloads or API keys and is **DEFERRED-NO-GPU**. The code
+path is real (the `ModelSpec.loader` seam is the same one the zoo loader and the
+live targets plug into) and is exercised here against tiny/offline models; it is
+**not faked**. The one-command step on a GPU host:
+
+```sh
+pip install "injectkit[zoo]"          # transformers + accelerate + bitsandbytes
+injectkit capability --attack prefill --models zoo --seeds 5 \
+  --quant fp16 --export-dir out/      # writes capability.{csv,json,md}
+```
+
+## 7. Offline-first & test posture
 
 `injectkit/benchmark.py` is pure data with no heavy imports, so it loads with no
 SDKs and no network. The benchmark unit tests construct `AttackResult`s in-memory
@@ -184,10 +243,13 @@ and assert the rollups — they never call a model or hit the network. The adapt
 attacker that feeds the benchmark uses a **local** model; its tests use a stub.
 The whole benchmark suite runs fully offline and deterministically.
 
-## 7. References
+## 8. References
 
 - OWASP Top 10 for LLM Applications — **LLM01: Prompt Injection**.
 - The ASR methodology mirrors the prompt-injection / jailbreak benchmark
   literature (AdvBench, HarmBench, JailbreakBench, Tensor Trust). Those datasets
   are **referenced, not bundled**, and load only on explicit opt-in — see
   [`RESEARCH-USE.md`](./RESEARCH-USE.md).
+- **MCPTox** (arXiv:2508.14925) — the capability-paradox finding (more-capable
+  models can be *more* susceptible to tool poisoning) that the `capability` sweep
+  (§6) measures.

@@ -128,16 +128,29 @@ All objectives remain the **benign canary marker**; no harmful target is ever se
   Wilson confidence intervals and the mandatory 8-field stamp (version, corpus-hash,
   model-revision, seed, quant, judge-id, attack-id, backend). Runs on a tiny CPU
   model offline; the 8B fp16-vs-4bit anchor cells are **DEFERRED-NO-GPU**.
+- **Capability-paradox sweep + `injectkit capability` CLI subcommand**
+  (`injectkit/bench/capability.py`). Runs one attack across a **set of target
+  models** ordered along a configurable **capability axis** (default: parameter
+  count) and emits the **ASR-vs-capability curve** + a model × attack leaderboard,
+  with a per-model Wilson CI and the full 8-field stamp on every point. It surfaces
+  the **MCPTox capability paradox** (arXiv:2508.14925) — that more-capable models
+  can be *more* susceptible to tool poisoning, the single strongest validation of
+  deterministic enforcement. The offline demo ladder runs on CPU with no download;
+  the **actual frontier sweep** (the pinned zoo models / live `anthropic`/`ollama`/
+  `openai` targets) is a documented one-command step marked **DEFERRED-NO-GPU** —
+  the loader seam is real and exercised against tiny/offline models, *not* faked.
+  See [docs/BENCHMARK.md](docs/BENCHMARK.md) §6.
 
 > ℹ️ **What v0.4 does NOT yet do.** No real 7–20B white-box model is loaded or
 > attacked on the development host (no GPU). The published leaderboard *numbers*
 > for flagship-scale models, full GCG ASR parity, `probe_sampling`, full-scale
 > AdvPrefix prefix mining, the transformer `clean_cls` backbone, the LLM-backed
-> StrongREJECT autograder, the gated Llama judges, and the vLLM backend are all
-> **DEFERRED-NO-GPU** — implemented in code and tested against tiny/offline seams,
-> but not executed at scale here. The repro stamp still records `version 0.3.0`
-> until the release is cut. Judge-in-the-loop attacks (REINFORCE-GCG, UJA) are
-> v0.5.
+> StrongREJECT autograder, the gated Llama judges, the vLLM backend, and **the
+> actual frontier capability-paradox curve** (`injectkit capability --models zoo`)
+> are all **DEFERRED-NO-GPU** — implemented in code and tested against tiny/offline
+> seams, but not executed at scale here. The repro stamp still records
+> `version 0.3.0` until the release is cut. Judge-in-the-loop attacks
+> (REINFORCE-GCG, UJA) are v0.5.
 
 ---
 

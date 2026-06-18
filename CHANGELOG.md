@@ -57,6 +57,19 @@ and **defensive / authorized-use only**.
   corpus-hash, model-revision, seed, quant, judge-id, attack-id, backend; `quant`
   never blank). Runs on a tiny CPU model offline; 8B fp16-vs-4bit anchor cells are
   **DEFERRED-NO-GPU**.
+- **Capability-paradox bench harness + `injectkit capability` CLI subcommand**
+  (`injectkit/bench/capability.py`) — runs one attack across a **set of target
+  models** ordered along a configurable capability axis (default: `params_b`) and
+  emits the **ASR-vs-capability curve** + a model × attack leaderboard, with a
+  per-model Wilson CI and the full 8-field stamp on every point, plus a
+  monotonicity verdict (`capability_paradox` / `inverse` / `flat`). Surfaces the
+  **MCPTox** finding (arXiv:2508.14925) that more-capable models can be *more*
+  susceptible to tool poisoning — the portfolio's validation of deterministic
+  enforcement. The offline demo ladder runs fully on CPU (mock-seam driven, what
+  the test suite exercises); the **actual frontier sweep** over the pinned zoo /
+  live `anthropic`/`ollama`/`openai` targets is a documented one-command step
+  marked **DEFERRED-NO-GPU** (loader seam real and exercised offline, not faked).
+  See `docs/BENCHMARK.md` §6.
 - **Docs** — `docs/BASELINE.md` (v0.3 recon that gates all v0.4 work),
   `docs/REPRODUCE.md` (GCG parity / tolerance bands / honesty ledger), and
   `docs/JUDGES.md` (judge licences, calibration floor, frozen hashes — assertions
@@ -70,6 +83,9 @@ and **defensive / authorized-use only**.
   loop; full-scale 8B AdvPrefix prefix mining.
 - The transformer `clean_cls` backbone; the LLM-backed StrongREJECT autograder;
   the gated `llama_guard` / `harmbench_cls` 8B/13B loads; the vLLM backend.
+- The **actual frontier capability-paradox curve** (`injectkit capability --models
+  zoo`) over real 7–20B models / live API targets — the offline demo ladder is
+  CPU-tested; the frontier numbers need a GPU + downloads or API keys.
 - The version string remains `0.3.0` (repro stamp included) until the release is
   cut. Judge-in-the-loop attacks (REINFORCE-GCG, UJA) are scoped to v0.5.
 
