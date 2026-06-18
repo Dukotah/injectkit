@@ -69,6 +69,18 @@ from .mask_gcg import MaskGCGAttack
 # keeps both import orders (whitebox-first and prefill-first) green.
 from ..attacks.whitebox import prefill as _prefill  # noqa: E402,F401  (registration)
 
+# Continuous embedding / soft-prompt attack (CHUNK 10-embedding-attack;
+# arXiv:2402.09063). Imported for its @register side effect (wires "embedding").
+from . import embedding as _embedding  # noqa: E402,F401  (import-time registration)
+from .embedding import (
+    EmbeddingAttack,
+    EmbeddingConfig,
+    EmbeddingModel,
+    HFEmbeddingModel,
+    SoftPrompt,
+    asetf_translate,
+)
+
 
 def __getattr__(name: str):  # PEP 562 — lazy re-export to dodge the import cycle.
     if name == "PrefillAttack":
@@ -130,6 +142,7 @@ __all__ = [
     "FasterGCGConfig",
     "MaskGCGConfig",
     "PrefillConfig",
+    "EmbeddingConfig",
     "AttackRegistry",
     "registry",
     "register",
@@ -157,6 +170,12 @@ __all__ = [
     "sm_accept",
     # Prefill attack (CHUNK 5-prefill-attack; arXiv:2602.14689).
     "PrefillAttack",
+    # Continuous embedding / soft-prompt attack (CHUNK 10; arXiv:2402.09063).
+    "EmbeddingAttack",
+    "EmbeddingModel",
+    "HFEmbeddingModel",
+    "SoftPrompt",
+    "asetf_translate",
     # nanoGCG-parity hardening (CHUNK 3-gcg-advprefix).
     "PromptSlices",
     "locate_optim_slice",

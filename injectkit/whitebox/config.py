@@ -40,7 +40,23 @@ __all__ = [
     "FasterGCGConfig",
     "MaskGCGConfig",
     "PrefillConfig",
+    "EmbeddingConfig",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy re-export of configs defined in attack submodules (PEP 562).
+
+    ``EmbeddingConfig`` (CHUNK 10) lives in ``whitebox/embedding.py`` alongside the
+    optimiser it parameterises (it imports nothing config-side, so co-locating it
+    there avoids an import cycle). It is re-exported here so the ROADMAP §5 config
+    surface (``GCGConfig``/``EmbeddingConfig``/...) resolves from one module.
+    """
+    if name == "EmbeddingConfig":
+        from .embedding import EmbeddingConfig
+
+        return EmbeddingConfig
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class AttackConfig(BaseModel):
