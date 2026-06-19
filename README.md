@@ -80,6 +80,63 @@ offline-by-default, and **defensive / authorized use only**.
 
 ---
 
+## What's new in v0.5 (efficiency + frontier attacks — unreleased)
+
+v0.5 completes the white-box stack: the **efficiency primitives** and the
+**objective-frontier, judge-in-the-loop attacks** that the v0.4 core was built to
+host. Like v0.4 it is **library-complete and CPU-tested end-to-end** — every
+attack registers on the white-box registry and runs through `injectkit attack
+--attack <key>` on a pure-Python offline seam (no torch, no download). The
+**headline ASR / wall-clock numbers** for each paper genuinely need a 24 GB GPU and
+a real 7–8B target, so they are honestly marked **DEFERRED-NO-GPU** (the code paths
+exist and run on tiny CPU models / offline seams — they are *not* faked). All
+objectives remain the **benign canary marker**; no harmful suffix or soft-prompt
+artifact is bundled.
+
+- **Probe Sampling** (`whitebox/probe_sampling.py`; arXiv:2403.01251, NeurIPS 2024).
+  A drop-in draft-model acceleration wrapper over GCG's candidate scoring: a cheap
+  draft model pre-ranks candidates and only a dynamically-sized probe set is
+  re-scored on the expensive target. Off by default (then GCG is byte-for-byte
+  unchanged). The **3.5×–6.3× speedup / non-degraded ASR** number is
+  **DEFERRED-NO-GPU**; the full path runs on a tiny CPU draft+target pair.
+- **I-GCG + Faster-GCG** (`whitebox/igcg.py`, `whitebox/faster_gcg.py`).
+  Registered as `igcg` (arXiv:2405.21018, ICLR 2025 — diverse benign targets, auto
+  multi-coordinate update, easy-to-hard init) and `faster_gcg` (arXiv:2410.15362 —
+  distance-regularised scoring, temperature sampling, visited-set dedup). Both
+  reuse the proven GCG core verbatim and are torch-free / CPU-unit-tested; the
+  full-scale efficiency/ASR numbers are **DEFERRED-NO-GPU**.
+- **Optional GCG variant tier** — `mask_gcg` (arXiv:2509.06350) plus flag-gated
+  momentum / MAGIC / SM-GCG primitives (arXiv:2405.01229 / arXiv:2412.08615). They
+  ship as **flags on `GCGConfig`, never blockers** — every flag at default is plain
+  GCG. Numbers **DEFERRED-NO-GPU**.
+- **Continuous embedding / soft-prompt attack** (`whitebox/embedding.py`;
+  arXiv:2402.09063, NeurIPS 2024). Registered as `embedding`: optimises the input
+  embeddings directly (Adam on a `ℝ^{k×d}` soft prompt, no discrete projection) as
+  the **capability ceiling** — what full weight + embedding access can reach. The
+  **embedding-ASR ≥ GCG-ASR at lower wall-clock on an 8B model** claim is
+  **DEFERRED-NO-GPU**; the optimiser converges on a tiny CPU model.
+- **Judge-in-the-loop frontier attacks** (`whitebox/reinforce_gcg.py`,
+  `whitebox/uja.py`). `reinforce_gcg` (arXiv:2502.17254, ICML 2025) replaces GCG's
+  fixed-target NLL with a REINFORCE objective over judge-graded sampled completions;
+  `uja` (arXiv:2510.02999) drops the affirmative target entirely and maximises the
+  in-loop judge score directly. A **test-enforced circularity firewall** requires
+  the in-loop OPT judge to differ from the leaderboard EVAL judge. The 7–8B
+  completion sampling and ASR-parity numbers are **DEFERRED-NO-GPU**.
+- **Bench + CLI integration** — all **eight** white-box attacks (`gcg`, `igcg`,
+  `faster_gcg`, `mask_gcg`, `prefill`, `embedding`, `reinforce_gcg`, `uja`) resolve
+  from the registry and run end-to-end through `injectkit attack` on the offline
+  CPU demo seam.
+
+> ℹ️ **What v0.5 does NOT yet do.** No real 7–20B white-box model is loaded or
+> attacked on the development host (no GPU). Every paper's **headline ASR /
+> wall-clock / speedup NUMBER** — Probe Sampling's 3.5×–6.3×, I-GCG / Faster-GCG /
+> Mask-GCG efficiency, the embedding attack's ≥-GCG capability ceiling, and the
+> REINFORCE-GCG / UJA ASR parity — is **DEFERRED-NO-GPU**: implemented in code and
+> exercised on tiny CPU models / offline seams, but not measured at flagship scale
+> here. The repro stamp still records `version 0.3.0` until the release is cut.
+
+---
+
 ## What's new in v0.4 (white-box core integration — unreleased)
 
 v0.4 lands the **white-box research core**: a license-clean, fully-offline
@@ -136,8 +193,8 @@ All objectives remain the **benign canary marker**; no harmful target is ever se
 > StrongREJECT autograder, the gated Llama judges, and the vLLM backend are all
 > **DEFERRED-NO-GPU** — implemented in code and tested against tiny/offline seams,
 > but not executed at scale here. The repro stamp still records `version 0.3.0`
-> until the release is cut. Judge-in-the-loop attacks (REINFORCE-GCG, UJA) are
-> v0.5.
+> until the release is cut. (The judge-in-the-loop attacks REINFORCE-GCG and UJA
+> that were scoped to v0.5 are now implemented — see *What's new in v0.5* above.)
 
 ---
 

@@ -39,6 +39,7 @@ when a scan actually needs it.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from typing import Optional, Sequence
@@ -1146,17 +1147,39 @@ def _attack_model_spec(args: argparse.Namespace):
 
 
 class _DemoPrefillSeam:
-    """Offline prefill/generation seam for the ``attack`` demo path (no torch).
+    """Offline seam for the ``attack`` demo path — drives EVERY registered attack.
 
-    Implements both the prefill seam (``prefill_generate``) and the generic
-    generation seam (``generate_text``) so it drives any registered white-box
-    attack's offline path. It echoes the benign marker found in the prompt so the
-    benign-canary judges record a deterministic success — proving the
-    registry -> seam -> judge -> aggregate -> stamp path end-to-end on CPU.
+    A single pure-Python, torch-free seam that satisfies all three offline seam
+    contracts the registered white-box attacks reach for, so ``injectkit attack
+    --attack <any-key>`` runs the full registry -> seam -> judge -> aggregate ->
+    stamp path on CPU with no download:
+
+    * the **prefill / generation** seam (``prefill_generate`` / ``generate_text``)
+      used by the prefill attack and the generation runner;
+    * the discrete **white-box** seam
+      (:class:`~injectkit.attackers.whitebox_base.WhiteBoxModel`:
+      ``token_ids`` / ``decode`` / ``target_loss`` / ``token_gradients``) used by
+      the GCG family (``gcg`` / ``igcg`` / ``faster_gcg`` / ``mask_gcg``) and the
+      judge-in-the-loop attacks (``reinforce_gcg`` / ``uja``, which fall back to
+      ``token_ids`` / ``decode`` for offline completion sampling);
+    * the continuous **embedding** seam
+      (:class:`~injectkit.whitebox.embedding.EmbeddingModel`: ``embed`` /
+      ``loss_from_embeds`` / ``grad_from_embeds`` / ``embedding_dim``) used by the
+      ``embedding`` soft-prompt attack.
+
+    The toy "gradients" / "losses" / "embeddings" are deterministic stand-ins (no
+    real autograd); the demo proves WIRING, not ASR. Real numbers need a zoo model
+    on a GPU host (DEFERRED-NO-GPU). The continuation echoes the prompt body so the
+    prefill/generation path produces a deterministic, marker-free completion.
     """
 
     name = "demo"
+    #: Toy vocabulary size for the fake one-hot gradient grid.
+    vocab = 64
+    #: Width of the toy embedding space for the continuous-embedding attack.
+    embedding_dim = 8
 
+    # -- prefill / generation seam ---------------------------------------- #
     def prefill_generate(self, messages, prefix, n_tokens, harmony=False):
         from .attacks.whitebox.prefill import GenerationResult
 
@@ -1169,6 +1192,55 @@ class _DemoPrefillSeam:
     def generate_text(self, messages, max_new_tokens, *, backend, seed):
         body = "".join(str(m.get("content", "")) for m in messages)
         return f" Here is the requested information: {body}"
+
+    # -- discrete white-box seam (GCG family / reinforce_gcg / uja) -------- #
+    def token_ids(self, text):
+        """Encode ``text`` to a deterministic list of small int ids (offline)."""
+        return [(ord(c) % self.vocab) for c in (text or "")]
+
+    def decode(self, ids):
+        """Decode toy ids back to text (best-effort, total — never raises)."""
+        try:
+            return "".join(chr((int(i) % 26) + 97) for i in ids)
+        except Exception:  # noqa: BLE001 - a demo seam must never raise
+            return ""
+
+    def target_loss(self, input_ids, target_ids):
+        """Deterministic toy loss (lower = 'closer'); pure Python, no torch."""
+        return float(abs(len(list(input_ids)) - len(list(target_ids))) + 1)
+
+    def token_gradients(self, input_ids, target_ids, suffix_slice):
+        """Deterministic ``[suffix_len, vocab]`` fake gradient grid (no torch)."""
+        if isinstance(suffix_slice, slice):
+            suffix_len = len(range(*suffix_slice.indices(len(list(input_ids)))))
+        else:
+            suffix_len = int(suffix_slice)
+        return [[-(j + 1) for j in range(self.vocab)] for _ in range(max(1, suffix_len))]
+
+    # -- continuous embedding seam (embedding soft-prompt attack) --------- #
+    def embed(self, ids):
+        """Map toy token ids to deterministic ``[len(ids), d]`` embeddings."""
+        d = self.embedding_dim
+        return [[math.sin(int(i) + 1.0 + j) for j in range(d)] for i in ids]
+
+    def loss_from_embeds(self, input_embeds, target_ids):
+        """Convex toy NLL: squared distance of the mean row from a fixed point."""
+        rows = list(input_embeds)
+        d = self.embedding_dim
+        n = max(1, len(rows))
+        mean = [sum(r[j] for r in rows) / n for j in range(d)]
+        target_point = [0.7 * (j + 1) for j in range(d)]
+        return float(sum((mean[j] - target_point[j]) ** 2 for j in range(d)))
+
+    def grad_from_embeds(self, input_embeds, target_ids):
+        """Analytic gradient of :meth:`loss_from_embeds` per row (no autograd)."""
+        rows = list(input_embeds)
+        d = self.embedding_dim
+        n = max(1, len(rows))
+        mean = [sum(r[j] for r in rows) / n for j in range(d)]
+        target_point = [0.7 * (j + 1) for j in range(d)]
+        base = [2.0 * (mean[j] - target_point[j]) / n for j in range(d)]
+        return [list(base) for _ in rows]
 
 
 def _render_leaderboard(board, cell, fmt: str) -> str:

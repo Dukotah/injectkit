@@ -5,7 +5,72 @@ All notable changes to **injectkit** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.4 white-box core integration
+## [Unreleased] — v0.5 efficiency + frontier attacks (builds on the v0.4 core)
+
+v0.5 completes the white-box stack the v0.4 core started: the **efficiency
+primitives** (Probe Sampling; the I-GCG / Faster-GCG / Mask-GCG GCG-family
+refinements) and the **objective-frontier, judge-in-the-loop attacks**
+(REINFORCE-GCG, UJA) plus the **continuous embedding / soft-prompt attack**. Like
+v0.4, it is **library-complete and CPU-tested end-to-end**: every attack registers
+on the white-box registry, runs through the `injectkit attack` bench harness on a
+pure-Python offline seam (no torch, no download), and is unit-tested. The
+**headline ASR / wall-clock NUMBERS** for each paper genuinely need a 24 GB GPU +
+a real 7–8B target, so they are marked **DEFERRED-NO-GPU** — the code paths exist
+and run on tiny CPU models / offline seams, they are *not* faked, but the
+flagship-scale measurement is not run here. Every objective remains the **benign
+canary marker**; no harmful target is set, no harmful suffix/soft-prompt artifact
+is bundled, and the version string stays `0.3.0` until the release is cut.
+
+### Added (v0.5)
+
+- **Probe Sampling efficiency primitive** (`whitebox/probe_sampling.py`; CHUNK 8,
+  arXiv:2403.01251). A drop-in draft-model acceleration wrapper over the shared GCG
+  candidate-scoring seam: a cheap draft model pre-ranks the `search_width`
+  candidates, the kept fraction is sized *dynamically* by draft↔target agreement,
+  and only that probe set is re-scored on the expensive target. With probe sampling
+  **off (default)** GCG scores the full batch exactly as before. The headline
+  **3.5×–6.3× speedup / non-degraded ASR on Llama-2-7B** is **DEFERRED-NO-GPU**;
+  the full path is verified on a tiny CPU draft+target pair.
+- **I-GCG + Faster-GCG GCG-family refinements** (`whitebox/igcg.py`,
+  `whitebox/faster_gcg.py`; CHUNK 9). Registered as `igcg` (arXiv:2405.21018,
+  ICLR 2025 — diverse benign-target templates, auto multi-coordinate update,
+  easy-to-hard init) and `faster_gcg` (arXiv:2410.15362 — distance-regularised
+  candidate scoring, temperature sampling, visited-set dedup). Both reuse the
+  proven GCG coordinate-descent core verbatim and are torch-free / CPU-unit-tested;
+  their full-scale efficiency/ASR numbers are **DEFERRED-NO-GPU**.
+- **Optional GCG variant tier** — `mask_gcg` (arXiv:2509.06350, token-position
+  pruning) plus flag-gated momentum / MAGIC / SM-GCG primitives
+  (`whitebox/gcg_variants.py`; arXiv:2405.01229 / arXiv:2412.08615). They ship as
+  **flags on `GCGConfig`, never blockers**; with every flag at default the
+  behaviour is byte-for-byte plain GCG. Numbers **DEFERRED-NO-GPU**.
+- **Continuous embedding / soft-prompt attack** (`whitebox/embedding.py`; CHUNK 10,
+  arXiv:2402.09063, NeurIPS 2024). Registered as `embedding`: optimises the input
+  embeddings directly (Adam on a `ℝ^{k×d}` soft prompt, no discrete projection) as
+  the **capability ceiling** — what full weight + embedding access can reach. Uses a
+  small additional `EmbeddingModel` seam (`HFEmbeddingModel` in production, a
+  pure-Python from-scratch-Adam fallback on CPU). The **embedding-ASR ≥ GCG-ASR at
+  lower wall-clock on an 8B model** claim is **DEFERRED-NO-GPU**; the optimiser
+  converges on a tiny CPU model.
+- **Objective-frontier, judge-in-the-loop attacks** (`whitebox/reinforce_gcg.py`,
+  `whitebox/uja.py`, `whitebox/objective_judge.py`; CHUNK 11). `reinforce_gcg`
+  (arXiv:2502.17254, ICML 2025) replaces GCG's fixed-target NLL with a REINFORCE
+  objective over sampled completions graded by a small **in-loop** judge; `uja`
+  (arXiv:2510.02999) drops the affirmative target entirely and maximises the
+  in-loop judge's score directly. A **test-enforced circularity firewall** requires
+  the in-loop OPT judge to differ from the leaderboard EVAL judge
+  (`opt_judge_id != eval_judge_id`), asserted at config construction and again
+  before the in-loop judge loads. Real completion sampling from a 7–8B target and
+  the ASR-parity numbers are **DEFERRED-NO-GPU**; the seam wiring + judge plumbing
+  run offline on the stub seam.
+- **Bench-harness + CLI integration** — all eight white-box attacks (`gcg`,
+  `igcg`, `faster_gcg`, `mask_gcg`, `prefill`, `embedding`, `reinforce_gcg`, `uja`)
+  resolve from `injectkit.whitebox.registry` and run end-to-end through
+  `injectkit attack --attack <key>` on the offline CPU demo seam. The demo seam now
+  satisfies the prefill/generation, discrete-white-box, and continuous-embedding
+  seam contracts, so every registered attack drives the full
+  registry → seam → judge → aggregate → 8-field-stamp path with no GPU.
+
+## v0.4 white-box core integration (Unreleased)
 
 The **white-box research core**: a license-clean, fully-offline white-box attack +
 judge + leaderboard stack, **library-complete and CPU-tested end-to-end**. Parts
@@ -16,7 +81,7 @@ Every objective is still the **benign canary marker**; no harmful target is set,
 and **no harmful artifact or Llama-derived weight is bundled**. Still offline-first
 and **defensive / authorized-use only**.
 
-### Added
+### Added (v0.4)
 
 - **White-box attack ABC + registry + typed configs** (`injectkit/whitebox/`) — a
   single typed `Attack` contract (`run(model, tokenizer, messages, target, cfg,
@@ -66,12 +131,15 @@ and **defensive / authorized-use only**.
 
 - Loading/attacking any real 7–20B white-box model; published leaderboard numbers
   for flagship-scale models.
-- Full GCG ASR parity (±10 abs pp) vs reference GCG; `probe_sampling` draft-model
-  loop; full-scale 8B AdvPrefix prefix mining.
+- Full GCG ASR parity (±10 abs pp) vs reference GCG; full-scale 8B AdvPrefix
+  prefix mining. (The `probe_sampling` draft-model loop landed in v0.5 above; only
+  its 8B speedup NUMBER stays DEFERRED-NO-GPU.)
 - The transformer `clean_cls` backbone; the LLM-backed StrongREJECT autograder;
   the gated `llama_guard` / `harmbench_cls` 8B/13B loads; the vLLM backend.
 - The version string remains `0.3.0` (repro stamp included) until the release is
-  cut. Judge-in-the-loop attacks (REINFORCE-GCG, UJA) are scoped to v0.5.
+  cut. (The judge-in-the-loop attacks REINFORCE-GCG and UJA that were scoped to
+  v0.5 are now implemented and registered — see the v0.5 section above; only their
+  GPU-scale ASR numbers remain DEFERRED-NO-GPU.)
 
 ## [0.3.0] — 2026-06-16
 
