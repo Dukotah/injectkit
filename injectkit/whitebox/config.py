@@ -39,6 +39,8 @@ __all__ = [
     "IGCGConfig",
     "FasterGCGConfig",
     "MaskGCGConfig",
+    "REINFORCEGCGConfig",
+    "UJAConfig",
     "PrefillConfig",
     "EmbeddingConfig",
 ]
@@ -306,6 +308,119 @@ class MaskGCGConfig(GCGConfig):
     #: Minimum number of positions always kept active regardless of
     #: :attr:`keep_fraction` (so a short suffix is never fully frozen).
     min_active: int = Field(default=1, ge=1)
+
+
+class REINFORCEGCGConfig(GCGConfig):
+    """Typed config for REINFORCE-GCG (**arXiv:2502.17254**, ICML 2025).
+
+    REINFORCE-GCG ("Improved Generation of Adversarial Examples Against Safety-aligned
+    LLMs", arXiv:2502.17254, ICML 2025) replaces GCG's *single fixed-target NLL*
+    objective with a **policy-gradient (REINFORCE) objective over a distribution of
+    completions**: each candidate suffix is scored by sampling several completions
+    from the target and grading them with a small IN-LOOP judge, then a REINFORCE
+    gradient pushes the suffix toward completions the judge scores as unsafe. This
+    optimises the *expected judge reward* of what the model actually generates,
+    rather than the likelihood of one hand-written affirmative prefix — which the
+    paper shows transfers and generalises far better than fixed-target GCG.
+
+    Adds the REINFORCE knobs on top of the shared :class:`GCGConfig` core:
+
+    * :attr:`num_samples` — completions sampled per candidate suffix (the Monte-Carlo
+      estimate of the expected reward; more samples ⇒ lower-variance gradient).
+    * :attr:`sample_temp` — temperature the completions are sampled at.
+    * :attr:`judge_id` — the IN-LOOP OPT judge graded each completion (the v0.4 judge
+      layer). It is **never** the eval judge: :attr:`eval_judge_id` records the
+      leaderboard judge so the circularity firewall (ROADMAP §6.10.1) can assert
+      ``judge_id != eval_judge_id`` at construction (test-enforced Decision of
+      Record).
+
+    The 24GB-VRAM-fit and the >2x / 85-86%-ASR-on-Llama-3 parity numbers are
+    **DEFERRED-NO-GPU**: the policy-gradient + judge-in-the-loop LOGIC/WIRING is
+    verified on the tiny CPU stub; the headline numbers need a 7-8B GPU run.
+    """
+
+    #: Completions sampled from the target per candidate suffix (Monte-Carlo
+    #: estimate of the expected judge reward; the REINFORCE batch).
+    num_samples: int = Field(default=4, ge=1)
+    #: Temperature the completions are sampled at (``> 0`` for a real distribution).
+    sample_temp: float = Field(default=1.0, gt=0.0)
+    #: IN-LOOP OPT judge id — grades each sampled completion (never the eval judge).
+    judge_id: str = "substring"
+    #: Leaderboard EVAL judge id, recorded ONLY to assert the firewall
+    #: ``judge_id != eval_judge_id`` (ROADMAP §6.10.1). Never resolved in-loop.
+    eval_judge_id: str = "clean_cls"
+
+    @field_validator("eval_judge_id")
+    @classmethod
+    def _judge_separation(cls, value: str, info: Any) -> str:
+        """Enforce the circularity firewall: OPT judge != EVAL judge (§6.10.1)."""
+        opt = info.data.get("judge_id")
+        if opt is not None and value == opt:
+            raise ValueError(
+                f"judge_id ({opt!r}) MUST differ from eval_judge_id ({value!r}): "
+                "optimising against the evaluation judge overfits it and invalidates "
+                "the reported ASR (ROADMAP §6.10.1 circularity firewall)."
+            )
+        return value
+
+
+class UJAConfig(AttackConfig):
+    """Typed config for UJA — Untargeted Jailbreak (**arXiv:2510.02999**).
+
+    UJA ("Untargeted Jailbreak Attack") drops the fixed affirmative target
+    **entirely**: there is no ``"Sure, here is"`` prefix and no target NLL term.
+    Instead the optimiser **maximises the in-loop judge's unsafety score of the
+    model's own sampled response directly** — the objective is
+    ``loss = -judge_score(response)``. Removing the targeted surrogate lets the
+    attack pursue *any* unsafe completion the judge recognises rather than forcing
+    one phrasing, which the paper shows reaches higher ASR with fewer queries.
+
+    UJA is **not** a GCG subclass config (it has no fixed target, so the
+    target/AdvPrefix machinery does not apply); it carries only the cross-attack
+    knobs plus the judge-in-the-loop sampling knobs:
+
+    * :attr:`judge_id` — the IN-LOOP OPT judge whose score is maximised (the v0.4
+      judge layer). **Never** the eval judge — :attr:`eval_judge_id` records the
+      leaderboard judge so the firewall ``judge_id != eval_judge_id`` (ROADMAP
+      §6.10.1) is asserted at construction.
+    * :attr:`num_samples` / :attr:`sample_temp` — the completion-sampling budget /
+      temperature (the response distribution the judge score is averaged over).
+    * :attr:`suffix_len` / :attr:`init_suffix` — UJA still optimises a benign
+      adversarial suffix on the input; only the *objective* changes.
+
+    The ASR-parity numbers are **DEFERRED-NO-GPU**: the untargeted judge-maximising
+    LOGIC is verified on the tiny CPU stub; the headline ASR needs a GPU run.
+    """
+
+    #: IN-LOOP OPT judge id whose unsafety score is maximised (never the eval judge).
+    judge_id: str = "substring"
+    #: Leaderboard EVAL judge id, recorded ONLY to assert the firewall
+    #: ``judge_id != eval_judge_id`` (ROADMAP §6.10.1). Never resolved in-loop.
+    eval_judge_id: str = "clean_cls"
+    #: Completions sampled from the target per candidate suffix (the response
+    #: distribution the judge score is averaged over).
+    num_samples: int = Field(default=4, ge=1)
+    #: Temperature the completions are sampled at (``> 0``).
+    sample_temp: float = Field(default=1.0, gt=0.0)
+    #: Length (in tokens) of the benign adversarial suffix optimised on the input.
+    suffix_len: int = Field(default=20, ge=1)
+    #: Top-k most-promising replacement tokens drawn from the gradient per slot.
+    top_k: int = Field(default=256, ge=1)
+    #: Initial benign filler suffix the optimiser starts from. ``None`` ⇒ default.
+    init_suffix: str | None = None
+
+    @field_validator("eval_judge_id")
+    @classmethod
+    def _judge_separation(cls, value: str, info: Any) -> str:
+        """Enforce the circularity firewall: OPT judge != EVAL judge (§6.10.1)."""
+        opt = info.data.get("judge_id")
+        if opt is not None and value == opt:
+            raise ValueError(
+                f"judge_id ({opt!r}) MUST differ from eval_judge_id ({value!r}): "
+                "optimising against the evaluation judge overfits it and invalidates "
+                "the reported ASR (ROADMAP §6.10.1 circularity firewall)."
+            )
+        return value
 
 
 class PrefillConfig(AttackConfig):

@@ -23,6 +23,8 @@ from .config import (
     IGCGConfig,
     MaskGCGConfig,
     PrefillConfig,
+    REINFORCEGCGConfig,
+    UJAConfig,
 )
 from .registry import (
     AttackRegistry,
@@ -79,6 +81,20 @@ from .embedding import (
     HFEmbeddingModel,
     SoftPrompt,
     asetf_translate,
+)
+
+# Objective-frontier, judge-in-the-loop attacks (CHUNK 11-reinforce-uja).
+# Imported for their @register side effect (wires "reinforce_gcg" and "uja").
+from . import objective_judge as _objective_judge  # noqa: E402,F401
+from . import reinforce_gcg as _reinforce_gcg  # noqa: E402,F401  (registration)
+from . import uja as _uja  # noqa: E402,F401  (registration)
+from .reinforce_gcg import REINFORCEGCGAttack, reinforce_loss
+from .uja import UJAAttack, uja_loss
+from .objective_judge import (
+    assert_judge_separation,
+    judge_scores,
+    resolve_opt_judge,
+    sample_completions,
 )
 
 
@@ -143,6 +159,8 @@ __all__ = [
     "MaskGCGConfig",
     "PrefillConfig",
     "EmbeddingConfig",
+    "REINFORCEGCGConfig",
+    "UJAConfig",
     "AttackRegistry",
     "registry",
     "register",
@@ -176,6 +194,15 @@ __all__ = [
     "HFEmbeddingModel",
     "SoftPrompt",
     "asetf_translate",
+    # Objective-frontier, judge-in-the-loop attacks (CHUNK 11-reinforce-uja).
+    "REINFORCEGCGAttack",  # arXiv:2502.17254
+    "UJAAttack",  # arXiv:2510.02999
+    "reinforce_loss",
+    "uja_loss",
+    "sample_completions",
+    "judge_scores",
+    "resolve_opt_judge",
+    "assert_judge_separation",
     # nanoGCG-parity hardening (CHUNK 3-gcg-advprefix).
     "PromptSlices",
     "locate_optim_slice",
