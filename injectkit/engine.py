@@ -566,11 +566,27 @@ class Engine:
         return sub.run(attacks)
 
     def _with_defense(self, defense: "Defense") -> Target:
-        """Wrap the engine's target with ``defense``'s hooks (NullDefense is no-op)."""
+        """Wrap the engine's target with ``defense``'s hooks (NullDefense is no-op).
+
+        When the defense is a :class:`~injectkit.defenses.smoothllm.SmoothLLMDefense`
+        (detected via the optional ``smooth_queries`` attribute), the engine uses
+        :class:`~injectkit.defenses.smoothllm._SmoothLLMTarget` instead of the
+        standard ``_DefendedTarget``.  That wrapper runs N perturbed copies of the
+        prompt and returns a majority-voted aggregate response — the only way to
+        support multi-query defenses without breaking the existing single-query path.
+
+        All other defenses still use the unchanged ``_DefendedTarget`` (single-query,
+        three-hook) path.
+        """
         from .defenses.base import NullDefense
 
         if getattr(defense, "name", "") == NullDefense.name:
             return self.target
+        # SmoothLLM (and any future multi-query defense) exposes `smooth_queries`.
+        if callable(getattr(defense, "smooth_queries", None)):
+            from .defenses.smoothllm import _SmoothLLMTarget
+
+            return _SmoothLLMTarget(self.target, defense)  # type: ignore[arg-type]
         from .benchmark_runner import _DefendedTarget
 
         return _DefendedTarget(self.target, defense)
